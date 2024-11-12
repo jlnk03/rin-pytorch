@@ -1,0 +1,9 @@
+torch
+torch-optimizer
+torchvision
+diffusers
+tqdm
+accelerate
+numpy
+einops
+wandb
