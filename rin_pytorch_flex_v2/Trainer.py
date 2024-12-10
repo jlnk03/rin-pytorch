@@ -14,6 +14,7 @@ from .utils.optimization_utils import (
     get_optimizer,
     override_config_for_names,
 )
+from .utils.data_utils import collate_variable_size_images
 
 
 def cycle(iterable):
@@ -49,7 +50,6 @@ class Trainer:
         checkpoint_folder="results",
         run_name="rin",
         log_to_wandb=True,
-        collate_fn=None,
     ):
         self.accelerator = Accelerator(split_batches=split_batches, mixed_precision="fp16" if fp16 else "no")
         self.accelerator.native_amp = amp
@@ -72,7 +72,7 @@ class Trainer:
             pin_memory=True,
             persistent_workers=True,
             drop_last=True,
-            collate_fn=collate_fn,
+            collate_fn=collate_variable_size_images
         )
 
         dl = self.accelerator.prepare(dl)
@@ -163,8 +163,15 @@ class Trainer:
             desc="Training",
         ) as pbar:
             while self.step < self.train_num_steps:
-                batch_img, batch_class = next(self.dl)
-                batch_class = torch.nn.functional.one_hot(batch_class, num_classes=self.num_classes).float()
+                batch = next(self.dl)
+                batch_img = batch['images']
+                batch_class = batch['labels']
+                
+                # Convert labels to one-hot
+                batch_class = torch.nn.functional.one_hot(
+                    batch_class, 
+                    num_classes=self.num_classes
+                ).float()
 
                 self.optimizer.zero_grad()
 
