@@ -77,17 +77,37 @@ class TransformerDecoderLayer(torch.nn.Module):
         self,
         x: torch.Tensor,
         enc: torch.Tensor,
-        att_mask: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.self_attention:
             x_ln = self.self_ln(x)
-            x_res, _ = self.self_mha(x_ln, x_ln, x_ln, need_weights=False, key_padding_mask=att_mask)
+            attn_mask = None
+            if attention_mask is not None:
+                attn_mask = attention_mask.float().masked_fill(attention_mask, float('-inf'))
+                
+            x_res, _ = self.self_mha(
+                x_ln, x_ln, x_ln,
+                need_weights=False,
+                attn_mask=attn_mask,
+                key_padding_mask=None
+            )
             x = x + self.dropp(x_res)
             
         if self.cross_attention:
             x_ln = self.cross_ln(x)
             enc = self.enc_ln(enc)
-            x_res, _ = self.cross_mha(query=x_ln, key=enc, value=enc, need_weights=False, key_padding_mask=att_mask)
+            attn_mask = None
+            if attention_mask is not None:
+                attn_mask = attention_mask.float().masked_fill(attention_mask, float('-inf'))
+                
+            x_res, _ = self.cross_mha(
+                query=x_ln,
+                key=enc,
+                value=enc,
+                need_weights=False,
+                attn_mask=attn_mask,
+                key_padding_mask=None
+            )
             x = x + self.dropp(x_res)
             
         if self.use_mlp:

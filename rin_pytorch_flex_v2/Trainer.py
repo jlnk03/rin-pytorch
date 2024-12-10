@@ -72,7 +72,10 @@ class Trainer:
             pin_memory=True,
             persistent_workers=True,
             drop_last=True,
-            collate_fn=collate_variable_size_images
+            collate_fn=lambda batch: collate_variable_size_images(
+                batch, 
+                embed_dim=diffusion_model.rin.latent_dim
+            )
         )
 
         dl = self.accelerator.prepare(dl)
@@ -166,6 +169,8 @@ class Trainer:
                 batch = next(self.dl)
                 batch_img = batch['images']
                 batch_class = batch['labels']
+                pos_embeddings = batch['pos_embeddings']
+                attention_masks = batch['attention_masks']
                 
                 # Convert labels to one-hot
                 batch_class = torch.nn.functional.one_hot(
@@ -175,7 +180,12 @@ class Trainer:
 
                 self.optimizer.zero_grad()
 
-                loss = self.diffusion_model(batch_img, batch_class)
+                loss = self.diffusion_model(
+                    batch_img, 
+                    batch_class,
+                    pos_embeddings=pos_embeddings,
+                    attention_masks=attention_masks
+                )
 
                 self.accelerator.backward(loss)
 

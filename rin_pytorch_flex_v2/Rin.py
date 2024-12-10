@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 from einops import rearrange
-from typing import Optional
+from typing import Optional, List
 
 from .modules import MLP, LambdaModule, ScalarEmbedding, TransformerDecoderLayer, TransformerEncoder
 from .utils.pos_embedding import create_2d_sin_cos_pos_emb
@@ -261,6 +261,8 @@ class Rin(torch.nn.Module):
         time_emb: torch.Tensor | None,
         cond: torch.Tensor | None,
         tape_prev: torch.Tensor | None,
+        pos_embeddings: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
         """Initialize tape with proper padding and attention mask
         Returns:
@@ -441,6 +443,8 @@ class Rin(torch.nn.Module):
         cond: torch.Tensor | None = None,
         latent_prev: torch.Tensor | None = None,
         tape_prev: torch.Tensor | None = None,
+        pos_embeddings: List[torch.Tensor] = None,
+        attention_masks: torch.Tensor = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         assert x.ndim == 4
         bs = x.shape[0]
@@ -458,10 +462,30 @@ class Rin(torch.nn.Module):
             raise ValueError("cond is None but cond_on_latent is True")
 
         time_emb, cond = self.initialize_cond(t, cond)
-        tape, tape_r, attention_mask = self.initialize_tape(x, time_emb, cond, tape_prev)
+        
+        # Use provided pos_embeddings if available, otherwise use default
+        if pos_embeddings is not None:
+            # Convert list of tensors to padded tensor
+            max_len = max(emb.size(0) for emb in pos_embeddings)
+            padded_pos_embs = torch.zeros(bs, max_len, self._latent_dim, device=x.device)
+            for i, emb in enumerate(pos_embeddings):
+                padded_pos_embs[i, :emb.size(0)] = emb
+        else:
+            padded_pos_embs = None
+        
+        tape, tape_r, curr_attention_mask = self.initialize_tape(
+            x, 
+            time_emb, 
+            cond, 
+            tape_prev,
+            pos_embeddings=padded_pos_embs,
+            attention_mask=attention_masks
+        )
+        
         latent = self.initialize_latent(bs, time_emb, cond, latent_prev)
-        latent, tape = self.compute(latent, tape, tape_r)
+        latent, tape = self.compute(latent, tape, tape_r, attention_mask=curr_attention_mask)
         x = self.readout_tape(tape)
+        
         return x, latent, tape[:, : self._tape_slots]
 
     def load_weights_numpy(self, np_file):
