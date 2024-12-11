@@ -276,14 +276,6 @@ class Rin(torch.nn.Module):
         # Get actual sequence length
         seq_len = tape.size(1)
         
-        # Create attention mask (False = attend, True = ignore)
-        attention_mask = create_padding_mask(
-            batch_size=b,
-            seq_len=seq_len,
-            max_len=self._max_seq_len,
-            device=x.device
-        )
-        
         # Add positional embeddings before padding
         if self._tape_pos_encoding == "learned":
             tape = tape + self.tape_pos_emb[:seq_len]
