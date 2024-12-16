@@ -6,7 +6,6 @@ from torchvision.utils import save_image
 from tqdm import tqdm
 
 def main():
-    # Create output directory
     output_dir = Path("cifar10_images")
     output_dir.mkdir(exist_ok=True, parents=True)
 
@@ -20,18 +19,15 @@ def main():
         transform=transform
     )
 
-    # We'll use the first 50,000 images (which is the entire training set)
     print("Extracting and saving CIFAR-10 images...")
     
-    # Create DataLoader for efficient processing
     dataloader = torch.utils.data.DataLoader(
         dataset,
-        batch_size=100,  # Process 100 images at a time
+        batch_size=100,
         shuffle=False,
         num_workers=4
     )
 
-    # Save images
     image_idx = 0
     for images, _ in tqdm(dataloader, desc="Saving images"):
         for image in images:
@@ -39,7 +35,7 @@ def main():
             save_image(
                 image,
                 output_dir / f"image_{image_idx:05d}.png",
-                normalize=False  # Already in [0,1] range
+                normalize=False
             )
             image_idx += 1
 
