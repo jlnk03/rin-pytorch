@@ -17,7 +17,11 @@ from .utils.optimization_utils import (
 
 from torch.nn.functional import pad
 
-def pad_to_max_size(batch):
+import torch
+from torch.nn.functional import pad, avg_pool2d
+from einops import rearrange
+
+def pad_to_max_size(batch, patch_size):
     # Extract images and labels from the batch
     images, labels = zip(*batch)
     
@@ -26,25 +30,34 @@ def pad_to_max_size(batch):
     max_width = max(img.shape[2] for img in images)
     
     padded_images = []
-    masks = []
+    patch_masks = []
     for img in images:
         _, h, w = img.shape
+        # Calculate padding
         padding = (0, max_width - w, 0, max_height - h)  # (left, right, top, bottom)
-        padded_images.append(pad(img, padding, value=0))
-        
-        # Create a binary mask: 1 for valid regions, 0 for padding
-        mask = torch.zeros((max_height, max_width), dtype=torch.bool)
-        mask[:h, :w] = 1
-        masks.append(mask)
+        padded_image = pad(img, padding, value=0)  # Pad with zeros (can change value if needed)
+        padded_images.append(padded_image)
 
-    # Stack padded images and masks into tensors
+        # Create pixel-level mask
+        pixel_mask = torch.zeros((max_height, max_width), dtype=torch.float32)
+        pixel_mask[:h, :w] = 1.0  # Mark valid regions as 1
+        
+        # Downsample pixel-level mask to patch size
+        pixel_mask = pixel_mask.unsqueeze(0)  # Add channel dimension for pooling
+        patch_mask = avg_pool2d(pixel_mask, kernel_size=patch_size, stride=patch_size)
+        patch_mask = (patch_mask > 0).int()  # Convert pooled mask to binary
+        patch_masks.append(patch_mask)
+
+    # Stack padded images and patch masks into tensors
     padded_images = torch.stack(padded_images)
-    masks = torch.stack(masks)  # Shape: (batch_size, max_height, max_width)
+    patch_masks = torch.stack(patch_masks).squeeze(1)  # Remove channel dimension from masks
+    patch_masks = rearrange(patch_masks, "b h w -> b (h w)").float()
 
     # Convert labels to a tensor
     labels = torch.tensor(labels)
     
-    return padded_images, masks, labels
+    return padded_images, patch_masks, labels
+
 
 
 
@@ -106,7 +119,7 @@ class Trainer:
             pin_memory=True,
             persistent_workers=True,
             drop_last=True,
-            collate_fn=pad_to_max_size,
+            collate_fn=lambda batch: pad_to_max_size(batch, patch_size)
         )
 
         dl = self.accelerator.prepare(dl)

@@ -42,7 +42,7 @@ class RinDiffusionModel(torch.nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         gamma = gamma.squeeze()
         assert gamma.ndim == 1
-        output, latent, tape = self.denoiser(x, gamma, cond, masks, latent_prev, tape_prev)
+        output, latent, tape = self.denoiser(x, gamma, masks, cond, latent_prev, tape_prev)
         return output, latent, tape
 
     @torch.no_grad()
@@ -121,6 +121,7 @@ class RinDiffusionModel(torch.nn.Module):
                         x=images_noised[mask],
                         gamma=gamma[mask],
                         cond=labels[mask],
+                        masks=masks[mask],
                     )
 
                 latent_prev[mask] = latent_prev_out.detach()

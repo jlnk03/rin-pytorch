@@ -4,11 +4,30 @@ from einops import rearrange
 
 from .modules import MLP, LambdaModule, ScalarEmbedding, TransformerDecoderLayer, TransformerEncoder
 from .utils.pos_embedding import create_2d_sin_cos_pos_emb
+import torch.nn.functional as F
 
 
 def _concat_tokens(*tokens: torch.Tensor | None) -> torch.Tensor:
     # tokens in shape [..., n, d]
     return torch.cat([t for t in tokens if t is not None], -2)
+
+def downsample_mask(mask: torch.Tensor, patch_size: int) -> torch.Tensor:
+    """
+    Downsamples the mask to match the spatial dimensions of the tape.
+    
+    Args:
+        mask: Binary mask of shape (batch_size, height, width).
+        patch_size: Size of the patch used in tape calculation.
+        
+    Returns:
+        Downsampled binary mask of shape (batch_size, height // patch_size, width // patch_size).
+    """
+    # Ensure mask is float for pooling, then back to binary
+    mask = mask.float()
+    pooled_mask = F.avg_pool2d(mask, kernel_size=patch_size, stride=patch_size)
+    # Convert pooled mask to binary (1 if any value > 0, else 0)
+    downsampled_mask = (pooled_mask > 0).int()
+    return downsampled_mask
 
 
 class Rin(torch.nn.Module):
@@ -78,12 +97,15 @@ class Rin(torch.nn.Module):
         )
         if cond_proj:
             if num_classes is None:
-                raise ValueError("num_classes must be provided when cond_proj=True")
-            self.cond_proj = torch.nn.Linear(num_classes, latent_dim if self._cond_on_latent else cond_dim)
+                raise ValueError(
+                    "num_classes must be provided when cond_proj=True")
+            self.cond_proj = torch.nn.Linear(
+                num_classes, latent_dim if self._cond_on_latent else cond_dim)
         else:
             self.cond_proj = torch.nn.Identity()
 
-        self.make_latent_pos(latent_slots, latent_dim, latent_pos_encoding, time_scaling)
+        self.make_latent_pos(latent_slots, latent_dim,
+                             latent_pos_encoding, time_scaling)
         self.make_tape_pos(tape_dim, tape_pos_encoding, time_scaling)
 
         if self_cond in ["latent", "latent+tape"]:
@@ -147,7 +169,8 @@ class Rin(torch.nn.Module):
                 )
             if num_layers_per_readwrite == 0:
                 self.write_units.append(LambdaModule(lambda x: x))
-                self.latent_processing_units.append(LambdaModule(lambda x, _: x))
+                self.latent_processing_units.append(
+                    LambdaModule(lambda x, _: x))
             else:
                 self.write_units.append(
                     TransformerDecoderLayer(
@@ -181,7 +204,7 @@ class Rin(torch.nn.Module):
 
         self.stem = torch.nn.Conv2d(
             in_channels=image_channels,
-            out_channels=tape_dim, 
+            out_channels=tape_dim,
             kernel_size=patch_size,
             stride=patch_size,
             padding=0,
@@ -206,12 +229,15 @@ class Rin(torch.nn.Module):
                 ),
             )
         if latent_pos_encoding == "learned":
-            self.latent_pos_emb = torch.nn.Parameter(torch.zeros(latent_slots, latent_dim))
+            self.latent_pos_emb = torch.nn.Parameter(
+                torch.zeros(latent_slots, latent_dim))
             torch.nn.init.trunc_normal_(self.latent_pos_emb, std=0.02)
         elif latent_pos_encoding == "sin_cos_plus_learned":
-            self.latent_pos_emb_res = torch.nn.Parameter(torch.zeros(latent_slots, latent_dim))
+            self.latent_pos_emb_res = torch.nn.Parameter(
+                torch.zeros(latent_slots, latent_dim))
         else:
-            raise ValueError(f"Unknown latent_pos_encoding `{latent_pos_encoding}`")
+            raise ValueError(
+                f"Unknown latent_pos_encoding `{latent_pos_encoding}`")
 
     def make_tape_pos(
         self,
@@ -230,12 +256,15 @@ class Rin(torch.nn.Module):
                 ),
             )
         if tape_pos_encoding == "learned":
-            self.tape_pos_emb = torch.nn.Parameter(torch.zeros(self._n_rows * self._n_cols, tape_dim))
+            self.tape_pos_emb = torch.nn.Parameter(
+                torch.zeros(self._n_rows * self._n_cols, tape_dim))
             torch.nn.init.trunc_normal_(self.tape_pos_emb, std=0.02)
         elif tape_pos_encoding == "sin_cos_plus_learned":
-            self.tape_pos_emb_res = torch.nn.Parameter(torch.zeros(self._n_rows * self._n_cols, tape_dim))
+            self.tape_pos_emb_res = torch.nn.Parameter(
+                torch.zeros(self._n_rows * self._n_cols, tape_dim))
         else:
-            raise ValueError(f"Unknown tape_pos_encoding `{tape_pos_encoding}`")
+            raise ValueError(
+                f"Unknown tape_pos_encoding `{tape_pos_encoding}`")
 
     def initialize_cond(
         self,
@@ -274,7 +303,7 @@ class Rin(torch.nn.Module):
 
         # apply masks from var image sizes to tape
         if masks is not None:
-            tape = tape * masks.unsqueeze(-1).float()
+            tape = tape * masks.unsqueeze(-1)
 
         if self._self_cond in ["tape", "latent+tape"] and tape_prev is not None:
             tape = tape + self.tape_prev_ln(self.tape_prev_proj(tape_prev))
@@ -299,7 +328,8 @@ class Rin(torch.nn.Module):
         if self._cond_on_latent and cond is not None:
             latent = _concat_tokens(latent, cond)
         if self._self_cond in ["latent", "latent+tape"] and latent_prev is not None:
-            latent = latent + self.latent_prev_ln(self.latent_prev_proj(latent_prev))
+            latent = latent + \
+                self.latent_prev_ln(self.latent_prev_proj(latent_prev))
         return latent
 
     def compute(
@@ -318,11 +348,12 @@ class Rin(torch.nn.Module):
                 tape_merged = _concat_tokens(tape, tape_r)
                 latent = self.read_units[i](latent, tape_merged, masks)
             latent = self.latent_processing_units[i](latent)
-            tape = self.write_units[i](tape, latent, masks)
+            tape = self.write_units[i](tape, latent)
         return latent, tape
 
     def readout_tape(self, tape: torch.Tensor) -> torch.Tensor:
-        tokens = self.output_linear(self.output_ln(tape[:, : self._num_tokens]))
+        tokens = self.output_linear(
+            self.output_ln(tape[:, : self._num_tokens]))
         tokens = rearrange(
             tokens,
             "b (h w) (p1 p2 c) -> b c (h p1) (w p2)",
@@ -349,16 +380,26 @@ class Rin(torch.nn.Module):
     def device(self) -> torch.device:
         return next(self.parameters()).device
 
+
     @torch.no_grad()
     def pass_dummy_data(self, num_classes: int | None = None) -> None:
-        # pass dummy data to initialize weights
         was_training = self.training
         self.eval()
 
+        # Create dummy data
+        dummy_image = torch.zeros([1, *self.image_shape], device=self.device)
+        dummy_mask = torch.ones([1, self.image_shape[-2] // self._patch_size, self.image_shape[-1] // self._patch_size], device=self.device, dtype=torch.bool)
+        dummy_mask = rearrange(dummy_mask, "b h w -> b (h w)").float()
+        dummy_label = None
+        if num_classes is not None:
+            dummy_label = torch.zeros([1, num_classes], device=self.device)
+
+        # Forward pass with dummy data
         self(
-            x=torch.zeros([1, *self.image_shape], device=self.device),
+            x=dummy_image,
             t=0.0,
-            cond=None if num_classes is None else torch.zeros([1, num_classes], device=self.device),
+            cond=dummy_label,
+            masks=dummy_mask,
         )
 
         self.train(was_training)
@@ -388,7 +429,8 @@ class Rin(torch.nn.Module):
             raise ValueError("cond is None but cond_on_latent is True")
 
         time_emb, cond = self.initialize_cond(t, cond)
-        tape, tape_r = self.initialize_tape(x, masks, time_emb, cond, tape_prev)
+        tape, tape_r = self.initialize_tape(
+            x, masks, time_emb, cond, tape_prev)
         latent = self.initialize_latent(bs, time_emb, cond, latent_prev)
         latent, tape = self.compute(latent, tape, tape_r, masks)
         x = self.readout_tape(tape)
