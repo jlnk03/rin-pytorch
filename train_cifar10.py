@@ -91,6 +91,7 @@ trainer = Trainer(
     diffusion_model,
     ema_diffusion_model,
     dataset,
+    patch_size=config["rin"]["patch_size"],
     **config["trainer"],
 )
 

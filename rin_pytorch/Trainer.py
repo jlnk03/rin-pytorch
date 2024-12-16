@@ -15,6 +15,38 @@ from .utils.optimization_utils import (
     override_config_for_names,
 )
 
+from torch.nn.functional import pad
+
+def pad_to_max_size(batch):
+    # Extract images and labels from the batch
+    images, labels = zip(*batch)
+    
+    # Find the maximum height and width in the batch
+    max_height = max(img.shape[1] for img in images)
+    max_width = max(img.shape[2] for img in images)
+    
+    padded_images = []
+    masks = []
+    for img in images:
+        _, h, w = img.shape
+        padding = (0, max_width - w, 0, max_height - h)  # (left, right, top, bottom)
+        padded_images.append(pad(img, padding, value=0))
+        
+        # Create a binary mask: 1 for valid regions, 0 for padding
+        mask = torch.zeros((max_height, max_width), dtype=torch.bool)
+        mask[:h, :w] = 1
+        masks.append(mask)
+
+    # Stack padded images and masks into tensors
+    padded_images = torch.stack(padded_images)
+    masks = torch.stack(masks)  # Shape: (batch_size, max_height, max_width)
+
+    # Convert labels to a tensor
+    labels = torch.tensor(labels)
+    
+    return padded_images, masks, labels
+
+
 
 def cycle(iterable):
     while True:
@@ -49,6 +81,7 @@ class Trainer:
         checkpoint_folder="results",
         run_name="rin",
         log_to_wandb=True,
+        patch_size=2,
     ):
         self.accelerator = Accelerator(split_batches=split_batches, mixed_precision="fp16" if fp16 else "no")
         self.accelerator.native_amp = amp
@@ -63,6 +96,8 @@ class Trainer:
         self.ema_update_every = ema_update_every
         self.sampling_kwargs = sampling_kwargs
 
+        self.patch_size = patch_size
+
         dl = DataLoader(
             dataset,
             batch_size=train_batch_size,
@@ -71,6 +106,7 @@ class Trainer:
             pin_memory=True,
             persistent_workers=True,
             drop_last=True,
+            collate_fn=pad_to_max_size,
         )
 
         dl = self.accelerator.prepare(dl)
@@ -161,12 +197,12 @@ class Trainer:
             desc="Training",
         ) as pbar:
             while self.step < self.train_num_steps:
-                batch_img, batch_class = next(self.dl)
+                batch_img, batch_mask, batch_class = next(self.dl)
                 batch_class = torch.nn.functional.one_hot(batch_class, num_classes=self.num_classes).float()
 
                 self.optimizer.zero_grad()
 
-                loss = self.diffusion_model(batch_img, batch_class)
+                loss = self.diffusion_model(batch_img, batch_mask, batch_class)
 
                 self.accelerator.backward(loss)
 

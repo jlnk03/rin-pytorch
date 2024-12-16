@@ -36,12 +36,13 @@ class RinDiffusionModel(torch.nn.Module):
         x: torch.Tensor,
         gamma: torch.Tensor,
         cond: torch.Tensor | None,
+        masks: torch.Tensor | None = None,
         latent_prev: torch.Tensor | None = None,
         tape_prev: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         gamma = gamma.squeeze()
         assert gamma.ndim == 1
-        output, latent, tape = self.denoiser(x, gamma, cond, latent_prev, tape_prev)
+        output, latent, tape = self.denoiser(x, gamma, cond, masks, latent_prev, tape_prev)
         return output, latent, tape
 
     @torch.no_grad()
@@ -101,6 +102,7 @@ class RinDiffusionModel(torch.nn.Module):
     def noise_denoise(
         self,
         images: torch.Tensor,
+        masks: torch.Tensor,
         labels: torch.Tensor,
         t: torch.Tensor | None = None,
     ):
@@ -124,7 +126,8 @@ class RinDiffusionModel(torch.nn.Module):
                 latent_prev[mask] = latent_prev_out.detach()
                 tape_prev[mask] = tape_prev_out.detach()
 
-        denoise_out, _, _ = self.denoise(images_noised, gamma, labels, latent_prev, tape_prev)
+        # pass masks to denoise
+        denoise_out, _, _ = self.denoise(images_noised, gamma, labels, masks, latent_prev, tape_prev)
 
         pred_dict = diffusion_utils.get_x0_eps(
             images_noised, gamma, denoise_out, self._pred_type, truncate_noise=False, clip_x0=True
@@ -148,9 +151,10 @@ class RinDiffusionModel(torch.nn.Module):
     def forward(
         self,
         images: torch.Tensor,
+        masks: torch.Tensor,
         labels: torch.Tensor,
         t: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        images, noise, _, pred_dict = self.noise_denoise(images, labels, t=t)
+        images, noise, _, pred_dict = self.noise_denoise(images, masks, labels, t=t)
         loss = self.compute_loss(images, noise, pred_dict)
         return loss

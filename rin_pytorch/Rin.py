@@ -254,6 +254,7 @@ class Rin(torch.nn.Module):
     def initialize_tape(
         self,
         x: torch.Tensor,
+        masks: torch.Tensor,
         time_emb: torch.Tensor | None,
         cond: torch.Tensor | None,
         tape_prev: torch.Tensor | None,
@@ -270,6 +271,10 @@ class Rin(torch.nn.Module):
         if self._tape_pos_encoding in ["sin_cos_plus_learned"]:
             tape_pos_emb += rearrange(self.tape_pos_emb_res, "n d -> 1 n d")
         tape = self.stem_ln(tape) + tape_pos_emb
+
+        # apply masks from var image sizes to tape
+        if masks is not None:
+            tape = tape * masks.unsqueeze(-1).float()
 
         if self._self_cond in ["tape", "latent+tape"] and tape_prev is not None:
             tape = tape + self.tape_prev_ln(self.tape_prev_proj(tape_prev))
@@ -302,16 +307,18 @@ class Rin(torch.nn.Module):
         latent: torch.Tensor,
         tape: torch.Tensor,
         tape_r: torch.Tensor | None,
+        masks: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         for i in range(len(self._num_layers)):
+            # pass masks to read and write units
             if self._cond_decoupled_read:
-                latent = self.read_cond_units[i](latent, tape_r)
-                latent = self.read_units[i](latent, tape)
+                latent = self.read_cond_units[i](latent, tape_r, masks)
+                latent = self.read_units[i](latent, tape, masks)
             else:
                 tape_merged = _concat_tokens(tape, tape_r)
-                latent = self.read_units[i](latent, tape_merged)
+                latent = self.read_units[i](latent, tape_merged, masks)
             latent = self.latent_processing_units[i](latent)
-            tape = self.write_units[i](tape, latent)
+            tape = self.write_units[i](tape, latent, masks)
         return latent, tape
 
     def readout_tape(self, tape: torch.Tensor) -> torch.Tensor:
@@ -360,6 +367,7 @@ class Rin(torch.nn.Module):
         self,
         x: torch.Tensor,
         t: torch.Tensor | float,
+        masks: torch.Tensor | None = None,
         cond: torch.Tensor | None = None,
         latent_prev: torch.Tensor | None = None,
         tape_prev: torch.Tensor | None = None,
@@ -380,9 +388,9 @@ class Rin(torch.nn.Module):
             raise ValueError("cond is None but cond_on_latent is True")
 
         time_emb, cond = self.initialize_cond(t, cond)
-        tape, tape_r = self.initialize_tape(x, time_emb, cond, tape_prev)
+        tape, tape_r = self.initialize_tape(x, masks, time_emb, cond, tape_prev)
         latent = self.initialize_latent(bs, time_emb, cond, latent_prev)
-        latent, tape = self.compute(latent, tape, tape_r)
+        latent, tape = self.compute(latent, tape, tape_r, masks)
         x = self.readout_tape(tape)
         return x, latent, tape[:, : self._tape_slots]
 

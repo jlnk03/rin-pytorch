@@ -58,7 +58,7 @@ class TransformerDecoderLayer(torch.nn.Module):
                 kdim=dim_x_att,
                 vdim=dim_x_att,
                 dropout=drop_att,
-                batch_first=True
+                batch_first=True,
             )
             
         if use_mlp:
@@ -76,6 +76,7 @@ class TransformerDecoderLayer(torch.nn.Module):
     def forward(
         self,
         x: torch.Tensor,
+        masks: torch.Tensor,
         enc: torch.Tensor,
     ) -> torch.Tensor:
         if self.self_attention:
@@ -86,7 +87,8 @@ class TransformerDecoderLayer(torch.nn.Module):
         if self.cross_attention:
             x_ln = self.cross_ln(x)
             enc = self.enc_ln(enc)
-            x_res, _ = self.cross_mha(query=x_ln, key=enc, value=enc, need_weights=False)
+            # apply masks from var image sizes to cross attention only and not self attention
+            x_res, _ = self.cross_mha(query=x_ln, key=enc, value=enc, need_weights=False, key_padding_mask=masks)
             x = x + self.dropp(x_res)
             
         if self.use_mlp:
