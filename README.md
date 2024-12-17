@@ -50,3 +50,7 @@ The following samples are generated using the same hyperparameters as the origin
 #### Samples from Tensorflow model trained using the pix2seq codebase (DDIM @ 100 steps):
 
 ![example_tensorflow](images/samples_rin_cifar10_tf_ddim100.png)
+
+## Acknowledgements
+
+This codebase builds on the RIN implementation by [leon-w/rin-pytorch](https://github.com/leon-w/rin-pytorch).
