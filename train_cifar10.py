@@ -1,4 +1,9 @@
 import torchvision
+from torchvision import transforms
+from pathlib import Path
+from PIL import Image
+import torch
+from torch.utils.data import Dataset
 
 from rin_pytorch import Rin, RinDiffusionModel, Trainer
 
@@ -74,16 +79,43 @@ rin_ema.pass_dummy_data(num_classes=10)
 ema_diffusion_model = RinDiffusionModel(rin=rin_ema, **config["diffusion"])
 
 
-dataset = torchvision.datasets.CIFAR10(
-    "datasets/cifar10",
+class FlexibleCIFAR10(Dataset):
+    def __init__(self, root_dir, train=True, transform=None):
+        self.root_dir = Path(root_dir)
+        self.split = 'train' if train else 'test'
+        self.transform = transform
+        
+        # Get all image paths
+        self.image_paths = []
+        self.labels = []
+        
+        for class_idx in range(10):
+            class_dir = self.root_dir / self.split / str(class_idx)
+            for img_path in class_dir.glob('*.png'):
+                self.image_paths.append(img_path)
+                self.labels.append(class_idx)
+    
+    def __len__(self):
+        return len(self.image_paths)
+    
+    def __getitem__(self, idx):
+        img_path = self.image_paths[idx]
+        image = Image.open(img_path).convert('RGB')
+        label = self.labels[idx]
+        
+        if self.transform:
+            image = self.transform(image)
+            
+        return image, label
+
+
+dataset = FlexibleCIFAR10(
+    "cifar10_flex",
     train=True,
-    download=True,
-    transform=torchvision.transforms.Compose(
-        [
-            torchvision.transforms.ToTensor(),
-            torchvision.transforms.RandomHorizontalFlip(),
-        ]
-    ),
+    transform=transforms.Compose([
+        transforms.ToTensor(),
+        transforms.RandomHorizontalFlip(),
+    ])
 )
 
 

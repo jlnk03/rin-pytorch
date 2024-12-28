@@ -62,6 +62,13 @@ class RinDiffusionModel(torch.nn.Module):
         else:
             cond = None
 
+        # create masks
+        masks = torch.ones(
+            (num_samples, samples_shape[2] // self.denoiser._patch_size, samples_shape[3] // self.denoiser._patch_size),
+            dtype=torch.bool,
+            device=device
+        )
+
         get_step = lambda t: torch.full([num_samples, 1, 1, 1], 1.0 - t / iterations, device=device)
         if self._inference_schedule is None:
             time_transform = self.scheduler.time_transform
@@ -80,7 +87,7 @@ class RinDiffusionModel(torch.nn.Module):
             time_step_p = torch.max(get_step(t + 1), torch.tensor(0.0))
             gamma, gamma_prev = time_transform(time_step), time_transform(time_step_p)
 
-            pred_out, latent_prev, tape_prev = self.denoise(samples, gamma, cond, latent_prev, tape_prev)
+            pred_out, latent_prev, tape_prev = self.denoise(samples, gamma, cond, masks, latent_prev, tape_prev)
             x0_eps = diffusion_utils.get_x0_eps(
                 samples, gamma, pred_out, self._pred_type, truncate_noise=True, clip_x0=True
             )
@@ -106,6 +113,7 @@ class RinDiffusionModel(torch.nn.Module):
         labels: torch.Tensor,
         t: torch.Tensor | None = None,
     ):
+
         images = images * 2.0 - 1.0
         images_noised, noise, _, gamma = self.scheduler.add_noise(images, t=t)
 

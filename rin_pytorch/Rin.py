@@ -295,10 +295,19 @@ class Rin(torch.nn.Module):
             tape_r = _concat_tokens(tape_r, cond)
 
         tape = self.stem(x)
+        bsz, tape_dim, n_rows, n_cols = tape.shape
+
+        # Dynamically calculate positional embeddings
+        dynamic_pos_emb = create_2d_sin_cos_pos_emb(n_rows, n_cols, tape_dim)
+        dynamic_pos_emb = dynamic_pos_emb.to(tape.device)  # Move to correct device
+
         tape = rearrange(tape, "b d h w -> b (h w) d")
-        tape_pos_emb = rearrange(self.tape_pos_emb, "n d -> 1 n d")
+
+        tape_pos_emb = rearrange(dynamic_pos_emb, "n d -> 1 n d") # Broadcast to batch size
+
         if self._tape_pos_encoding in ["sin_cos_plus_learned"]:
             tape_pos_emb += rearrange(self.tape_pos_emb_res, "n d -> 1 n d")
+
         tape = self.stem_ln(tape) + tape_pos_emb
 
         # apply masks from var image sizes to tape
@@ -310,7 +319,7 @@ class Rin(torch.nn.Module):
         if self._cond_tape_writable and tape_r is not None:
             tape, tape_r = _concat_tokens(tape, tape_r), None
 
-        return tape, tape_r
+        return tape, tape_r, n_rows, n_cols
 
     def initialize_latent(
         self,
@@ -351,14 +360,14 @@ class Rin(torch.nn.Module):
             tape = self.write_units[i](tape, latent)
         return latent, tape
 
-    def readout_tape(self, tape: torch.Tensor) -> torch.Tensor:
+    def readout_tape(self, tape: torch.Tensor, n_rows: int, n_cols: int) -> torch.Tensor:
         tokens = self.output_linear(
-            self.output_ln(tape[:, : self._num_tokens]))
+            self.output_ln(tape[:, : n_rows * n_cols]))
         tokens = rearrange(
             tokens,
             "b (h w) (p1 p2 c) -> b c (h p1) (w p2)",
-            h=self._n_rows,
-            w=self._n_cols,
+            h=n_rows,
+            w=n_cols,
             p1=self._patch_size,
             p2=self._patch_size,
         )
@@ -429,11 +438,12 @@ class Rin(torch.nn.Module):
             raise ValueError("cond is None but cond_on_latent is True")
 
         time_emb, cond = self.initialize_cond(t, cond)
-        tape, tape_r = self.initialize_tape(
+        tape, tape_r, n_rows, n_cols = self.initialize_tape(
             x, masks, time_emb, cond, tape_prev)
         latent = self.initialize_latent(bs, time_emb, cond, latent_prev)
         latent, tape = self.compute(latent, tape, tape_r, masks)
-        x = self.readout_tape(tape)
+        x = self.readout_tape(tape, n_rows, n_cols)
+        x = self.readout_tape(tape, n_rows, n_cols)
         return x, latent, tape[:, : self._tape_slots]
 
     def load_weights_numpy(self, np_file):
