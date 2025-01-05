@@ -64,7 +64,7 @@ config = dict(
         ema_update_every=1,
         sampling_kwargs=dict(iterations=100, method="ddim"),
         checkpoint_folder="results/cifar10",
-        run_name="rin_cifar10",
+        run_name="rin_flex1.5x",
         log_to_wandb=True,
     ),
 )
@@ -101,13 +101,15 @@ class FlexibleCIFAR10(Dataset):
     def __getitem__(self, idx):
         img_path = self.image_paths[idx]
         image = Image.open(img_path).convert('RGB')
+        # Scale image by 2x
+        w, h = image.size
+        image = image.resize((int(w*1.5), int(h*1.5)), Image.Resampling.LANCZOS)
         label = self.labels[idx]
         
         if self.transform:
             image = self.transform(image)
             
         return image, label
-
 
 dataset = FlexibleCIFAR10(
     "cifar10_flex",

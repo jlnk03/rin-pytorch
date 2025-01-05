@@ -92,7 +92,7 @@ class Trainer:
         ema_update_every=1,
         sampling_kwargs=dict(iterations=100, method="ddim"),
         checkpoint_folder="results",
-        run_name="rin",
+        run_name="rin_16",
         log_to_wandb=True,
         patch_size=2,
     ):
@@ -248,14 +248,14 @@ class Trainer:
                                 if param.requires_grad:
                                     ema_param.data.lerp_(param.data, 1 - self.ema_decay)
 
-                    if self.step % self.sample_every == 0:
-                        self.ema_diffusion_model.eval()
-                        n = 8
-                        samples = self.ema_diffusion_model.sample(num_samples=n * n, **self.sampling_kwargs)
+                    # if self.step % self.sample_every == 0:
+                    #     self.ema_diffusion_model.eval()
+                    #     n = 8
+                    #     samples = self.ema_diffusion_model.sample(num_samples=n * n, **self.sampling_kwargs)
 
-                        samples = make_grid(samples, nrow=n, normalize=True, value_range=(0, 1), padding=0)
-                        wandb.log({"samples": [wandb.Image(samples)]}, step=self.step)
+                    #     samples = make_grid(samples, nrow=n, normalize=True, value_range=(0, 1), padding=0)
+                    #     wandb.log({"samples": [wandb.Image(samples)]}, step=self.step)
 
-                        self.save("latest")
+                    #     self.save("latest")
 
-                        del samples
+                    #     del samples
