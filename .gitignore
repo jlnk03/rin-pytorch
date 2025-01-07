@@ -177,4 +177,6 @@ cython_debug/
 
 cifar10_flex/
 
+cifar10/
+
 wandb/

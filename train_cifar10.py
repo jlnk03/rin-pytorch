@@ -122,7 +122,7 @@ class FlexibleCIFAR10(Dataset):
 
 
 dataset = torchvision.datasets.CIFAR10(
-    root="cifar10_flex",
+    root="cifar10",
     train=True,
     download=True,
     transform=transforms.Compose([
