@@ -64,7 +64,7 @@ config = dict(
         ema_update_every=1,
         sampling_kwargs=dict(iterations=100, method="ddim"),
         checkpoint_folder="results/cifar10",
-        run_name="rin_flex1.5x",
+        run_name="rin_flex",
         log_to_wandb=True,
     ),
 )
@@ -103,7 +103,7 @@ class FlexibleCIFAR10(Dataset):
         image = Image.open(img_path).convert('RGB')
         # Scale image by 2x
         w, h = image.size
-        image = image.resize((int(w*1.5), int(h*1.5)), Image.Resampling.LANCZOS)
+        # image = image.resize((int(w*1.5), int(h*1.5)), Image.Resampling.LANCZOS)
         label = self.labels[idx]
         
         if self.transform:
@@ -111,25 +111,25 @@ class FlexibleCIFAR10(Dataset):
             
         return image, label
 
-# dataset = FlexibleCIFAR10(
-#     "cifar10_flex",
-#     train=True,
-#     transform=transforms.Compose([
-#         transforms.ToTensor(),
-#         transforms.RandomHorizontalFlip(),
-#     ])
-# )
-
-
-dataset = torchvision.datasets.CIFAR10(
-    root="cifar10",
+dataset = FlexibleCIFAR10(
+    "datasets/cifar10_flex",
     train=True,
-    download=True,
     transform=transforms.Compose([
         transforms.ToTensor(),
         transforms.RandomHorizontalFlip(),
     ])
 )
+
+
+# dataset = torchvision.datasets.CIFAR10(
+#     root="datasets",
+#     train=True,
+#     download=True,
+#     transform=transforms.Compose([
+#         transforms.ToTensor(),
+#         transforms.RandomHorizontalFlip(),
+#     ])
+# )
 
 
 trainer = Trainer(

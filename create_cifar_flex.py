@@ -71,8 +71,8 @@ def create_flex_dataset(args):
     
     # Load CIFAR-10
     transform = torchvision.transforms.ToTensor()
-    trainset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
-    testset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True, transform=transform)
+    trainset = torchvision.datasets.CIFAR10(root='datasets', train=True, download=True, transform=transform)
+    testset = torchvision.datasets.CIFAR10(root='datasets', train=False, download=True, transform=transform)
     
     # Process each split
     dataset_stats = {'train': {}, 'test': {}}
@@ -130,7 +130,7 @@ def create_flex_dataset(args):
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Create CIFAR-Flex dataset with varying aspect ratios')
-    parser.add_argument('--output-dir', type=str, default='cifar10_flex',
+    parser.add_argument('--output-dir', type=str, default='datasets/cifar10_flex',
                         help='Output directory for the dataset')
     parser.add_argument('--min-size', type=int, default=32,
                         help='Minimum size for any dimension')
