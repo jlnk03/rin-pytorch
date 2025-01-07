@@ -174,3 +174,7 @@ cython_debug/
 #.idea/
 
 .DS_Store
+
+cifar10_flex/
+
+wandb/

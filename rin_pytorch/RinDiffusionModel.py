@@ -3,7 +3,8 @@ from tqdm import tqdm
 
 from .Rin import Rin
 from .utils import diffusion_utils
-
+from einops import rearrange
+from .utils.mask import downsample_mask
 
 class RinDiffusionModel(torch.nn.Module):
     def __init__(
@@ -46,52 +47,125 @@ class RinDiffusionModel(torch.nn.Module):
         return output, latent, tape
 
     @torch.no_grad()
-    def sample(self, num_samples=64, iterations=100, method="ddim", seed=None, class_override=None):
-        samples_shape = [num_samples, *self.denoiser.image_shape]
+    def sample(
+        self,
+        num_samples: int = 64,
+        iterations: int = 100,
+        method: str = "ddim",
+        seed: int | None = None,
+        class_override: int | None = None,
+        mask: torch.Tensor | None = None,
+    ):
+        """
+        Generate samples using the given diffusion model.
+
+        Args:
+            num_samples: Number of samples to generate.
+            iterations: Number of sampling steps (diffusion timesteps).
+            method: Sampler name (e.g. "ddim", "ddpm", etc.).
+            seed: Optional random seed for reproducible sampling.
+            class_override: If set, use this single class for all samples.
+            mask: Optionally supply a float/binary mask of shape:
+                  (num_samples, image_height, image_width) or (num_samples, 1, image_height, image_width).
+                  If None, a default mask of all 1s is used.
+
+        Returns:
+            (samples) Generated images in [0, 1].
+        """
         device = self.denoiser.device
+        image_shape = self.denoiser.image_shape  # [C, H, W]
+        patch_size = self.denoiser._patch_size
+
+        # Prepare class-conditional input if needed
         if self._conditional == "class":
-            # generate random classes
             if class_override is not None:
-                cond = torch.full([num_samples], class_override, device=device, dtype=torch.long)
+                cond_classes = torch.full(
+                    [num_samples],
+                    class_override,
+                    device=device,
+                    dtype=torch.long
+                )
             else:
                 generator = None
                 if seed is not None:
                     generator = torch.Generator(device=device).manual_seed(seed)
-                cond = torch.randint(self._num_classes, [num_samples], device=device, generator=generator)
-            cond = torch.nn.functional.one_hot(cond, self._num_classes).float()
+                cond_classes = torch.randint(
+                    self._num_classes,
+                    [num_samples],
+                    device=device,
+                    generator=generator,
+                )
+            cond = torch.nn.functional.one_hot(cond_classes, self._num_classes).float()
         else:
             cond = None
 
-        # create masks
-        masks = torch.ones(
-            (num_samples, samples_shape[2] // self.denoiser._patch_size, samples_shape[3] // self.denoiser._patch_size),
-            dtype=torch.bool,
-            device=device
-        )
+        # Prepare shape of initial noise
+        samples_shape = [num_samples, *image_shape]  # (B, C, H, W)
+        samples = self.scheduler.sample_noise(samples_shape, device=device, seed=seed)
 
-        get_step = lambda t: torch.full([num_samples, 1, 1, 1], 1.0 - t / iterations, device=device)
+        # If no mask is provided, default to an all-ones mask in the *image* resolution.
+        if mask is None:
+            mask = torch.ones(
+                (num_samples, image_shape[1], image_shape[2]),
+                dtype=torch.float,
+                device=device,
+            )
+        # If mask has shape (B, 1, H, W), reduce it to (B, H, W) for convenience
+        if mask.ndim == 4 and mask.shape[1] == 1:
+            mask = mask.squeeze(1)
+
+        # Downsample the mask from (H, W) to (H//patch_size, W//patch_size) if needed
+        # mask_out -> (B, H//patch_size, W//patch_size)
+        mask_out = downsample_mask(mask, patch_size)  # [b, h//p, w//p]
+        # re-shape from (B, H//patch_size, W//patch_size) -> (B, H//patch_size * W//patch_size)
+        mask_out = rearrange(mask_out, "b h w -> b (h w)").bool()
+
+        # Prepare schedule transforms
         if self._inference_schedule is None:
             time_transform = self.scheduler.time_transform
         else:
-            time_transform = self.scheduler.get_time_transform(self._inference_schedule)
+            time_transform = self.scheduler.get_time_transform(
+                self._inference_schedule
+            )
 
-        samples = self.scheduler.sample_noise(samples_shape, device=device, seed=seed)
+        # Helper to get the (1 - t/iterations) step
+        def get_step(t):
+            return torch.full(
+                [num_samples, 1, 1, 1],
+                1.0 - t / iterations,
+                device=device,
+            )
+
         data_pred = torch.zeros_like(samples, device=device)
-
         latent_prev = None
         tape_prev = None
+
         for t in tqdm(
-            torch.arange(iterations, dtype=torch.float32, device=device), desc="sampling", leave=False, position=1
+            torch.arange(iterations, dtype=torch.float32, device=device),
+            desc="sampling",
+            leave=False,
         ):
             time_step = get_step(t)
-            time_step_p = torch.max(get_step(t + 1), torch.tensor(0.0))
+            time_step_p = torch.max(get_step(t + 1), torch.tensor(0.0, device=device))
             gamma, gamma_prev = time_transform(time_step), time_transform(time_step_p)
 
-            pred_out, latent_prev, tape_prev = self.denoise(samples, gamma, cond, masks, latent_prev, tape_prev)
+            # Denoise with current samples
+            pred_out, latent_prev, tape_prev = self.denoise(
+                samples, gamma, cond, mask_out, latent_prev, tape_prev
+            )
+
+            # Convert model output to x0 and eps
             x0_eps = diffusion_utils.get_x0_eps(
-                samples, gamma, pred_out, self._pred_type, truncate_noise=True, clip_x0=True
+                samples,
+                gamma,
+                pred_out,
+                self._pred_type,
+                truncate_noise=True,
+                clip_x0=True,
             )
             noise_pred, data_pred = x0_eps["noise_pred"], x0_eps["data_pred"]
+
+            # Take one sampling step
             samples = self.scheduler.transition_step(
                 samples=samples,
                 data_pred=data_pred,
@@ -101,7 +175,8 @@ class RinDiffusionModel(torch.nn.Module):
                 sampler_name=method,
             )
 
-        samples = data_pred * 0.5 + 0.5  # convert -1,1 -> 0,1
+        # Map final samples from [-1, 1] into [0, 1], clamp, and return
+        samples = data_pred * 0.5 + 0.5
         samples.clamp_(0.0, 1.0)
 
         return samples

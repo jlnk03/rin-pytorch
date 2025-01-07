@@ -111,9 +111,20 @@ class FlexibleCIFAR10(Dataset):
             
         return image, label
 
-dataset = FlexibleCIFAR10(
-    "cifar10_flex",
+# dataset = FlexibleCIFAR10(
+#     "cifar10_flex",
+#     train=True,
+#     transform=transforms.Compose([
+#         transforms.ToTensor(),
+#         transforms.RandomHorizontalFlip(),
+#     ])
+# )
+
+
+dataset = torchvision.datasets.CIFAR10(
+    root="cifar10_flex",
     train=True,
+    download=True,
     transform=transforms.Compose([
         transforms.ToTensor(),
         transforms.RandomHorizontalFlip(),
