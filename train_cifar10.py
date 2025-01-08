@@ -59,7 +59,7 @@ config = dict(
         ema_update_every=1,
         sampling_kwargs=dict(iterations=100, method="ddim"),
         checkpoint_folder="results/cifar10",
-        run_name="rin_cifar10",
+        run_name="rin_vanilla",
         log_to_wandb=True,
     ),
 )
