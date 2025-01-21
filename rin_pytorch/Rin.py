@@ -284,6 +284,8 @@ class Rin(torch.nn.Module):
         dynamic_pos_emb = create_2d_sin_cos_pos_emb(n_rows, n_cols, tape_dim)
         dynamic_pos_emb = dynamic_pos_emb.to(tape.device)  # Move to correct device
 
+        # print(f'tape before: {tape.shape}')
+
         tape = rearrange(tape, "b d h w -> b (h w) d")
 
         tape_pos_emb = rearrange(dynamic_pos_emb, "n d -> 1 n d") # Broadcast to batch size
@@ -292,6 +294,9 @@ class Rin(torch.nn.Module):
             tape_pos_emb += rearrange(self.tape_pos_emb_res, "n d -> 1 n d")
 
         tape = self.stem_ln(tape) + tape_pos_emb
+
+        # print(f'tape.shape: {tape.shape}')
+        # print(f'masks.shape: {masks.shape}')
 
         # apply masks from var image sizes to tape
         if masks is not None:

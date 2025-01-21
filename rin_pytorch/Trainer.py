@@ -28,37 +28,39 @@ def pad_to_max_size(batch, patch_size):
     # Find the maximum height and width in the batch
     max_height = max(img.shape[1] for img in images)
     max_width = max(img.shape[2] for img in images)
+
+    max_pixels = max_height * max_width
     
     padded_images = []
     patch_masks = []
     for img in images:
         _, h, w = img.shape
-        # Calculate padding
-        padding = (0, max_width - w, 0, max_height - h)  # (left, right, top, bottom)
-        padded_image = pad(img, padding, value=0)  # Pad with zeros (can change value if needed)
-        padded_images.append(padded_image)
+        pixel_row = rearrange(img, "b h w -> b (h w)")
+        pixel_row = pixel_row
 
-        # Create pixel-level mask
-        pixel_mask = torch.zeros((max_height, max_width), dtype=torch.float32)
-        pixel_mask[:h, :w] = 1.0  # Mark valid regions as 1
+        patch_mask = torch.ones(pixel_row.shape[1])
+
+        # pad to max pixels
+        pixel_row = pad(pixel_row, (0, max_pixels - pixel_row.shape[1]), value=0)
+        patch_mask = pad(patch_mask, (0, max_pixels - patch_mask.shape[0]), value=0)
         
         # Downsample pixel-level mask to patch size
-        pixel_mask = pixel_mask.unsqueeze(0)  # Add channel dimension for pooling
-        patch_mask = avg_pool2d(pixel_mask, kernel_size=patch_size, stride=patch_size)
+        # patch_mask = avg_pool2d(patch_mask, kernel_size=patch_size, stride=patch_size)
+        # only keep every patch_size * patch_size pixels
+        patch_mask = patch_mask[::patch_size*patch_size]
         patch_mask = (patch_mask > 0).int()  # Convert pooled mask to binary
         patch_masks.append(patch_mask)
 
-    # Stack padded images and patch masks into tensors
-    padded_images = torch.stack(padded_images)
-    patch_masks = torch.stack(patch_masks).squeeze(1)  # Remove channel dimension from masks
-    patch_masks = rearrange(patch_masks, "b h w -> b (h w)").float()
+        pixels = rearrange(pixel_row, "b (h w) -> b h w", h=max_height, w=max_width)
+        padded_images.append(pixels)
 
     # Convert labels to a tensor
     labels = torch.tensor(labels)
+    padded_images = torch.stack(padded_images)
+    patch_masks = torch.stack(patch_masks).bool()
+    # print(f'masks.dtype: {patch_masks.dtype}')
     
     return padded_images, patch_masks, labels
-
-
 
 
 def cycle(iterable):
@@ -211,6 +213,8 @@ class Trainer:
         ) as pbar:
             while self.step < self.train_num_steps:
                 batch_img, batch_mask, batch_class = next(self.dl)
+                # print(f'batch_img.shape: {batch_img.shape}')
+                # print(f'batch_mask.shape: {batch_mask.shape}')
                 batch_class = torch.nn.functional.one_hot(batch_class, num_classes=self.num_classes).float()
 
                 self.optimizer.zero_grad()
