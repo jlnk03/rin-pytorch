@@ -4,8 +4,12 @@ from pathlib import Path
 from PIL import Image
 import torch
 from torch.utils.data import Dataset
+from datetime import datetime
 
 from rin_pytorch import Rin, RinDiffusionModel, Trainer
+
+# Create timestamp string
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
 config = dict(
     rin=dict(
@@ -22,7 +26,7 @@ config = dict(
         image_channels=3,
         patch_size=2,
         latent_pos_encoding="learned",
-        tape_pos_encoding="learned",
+        tape_pos_encoding="sin_cos",
         drop_path=0.1,
         drop_units=0.1,
         drop_att=0.0,
@@ -63,8 +67,8 @@ config = dict(
         ema_decay=0.9999,
         ema_update_every=1,
         sampling_kwargs=dict(iterations=100, method="ddim"),
-        checkpoint_folder="results/cifar10",
-        run_name="rin_flex",
+        checkpoint_folder=f"results/cifar10/{timestamp}",
+        run_name=f"rin_flex_{timestamp}",
         log_to_wandb=True,
     ),
 )

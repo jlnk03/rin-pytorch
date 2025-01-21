@@ -49,7 +49,7 @@ def main():
         image_channels=3,
         patch_size=2,
         latent_pos_encoding="learned",
-        tape_pos_encoding="learned",
+        tape_pos_encoding="sin_cos",
         drop_path=0.1,
         drop_units=0.1,
         drop_att=0.0,
