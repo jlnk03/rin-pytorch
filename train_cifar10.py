@@ -26,7 +26,7 @@ config = dict(
         image_channels=3,
         patch_size=2,
         latent_pos_encoding="learned",
-        tape_pos_encoding="sin_cos",
+        tape_pos_encoding="learned",
         drop_path=0.1,
         drop_units=0.1,
         drop_att=0.0,
@@ -68,7 +68,7 @@ config = dict(
         ema_update_every=1,
         sampling_kwargs=dict(iterations=100, method="ddim"),
         checkpoint_folder=f"results/cifar10/{timestamp}",
-        run_name=f"rin_flex_{timestamp}",
+        run_name=f"rin_flex_new_pos",
         log_to_wandb=True,
     ),
 )
