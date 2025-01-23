@@ -299,8 +299,8 @@ class Rin(torch.nn.Module):
         # print(f'masks.shape: {masks.shape}')
 
         # apply masks from var image sizes to tape
-        if masks is not None:
-            tape = tape * masks.unsqueeze(-1)
+        # if masks is not None:
+        #     tape = tape * masks.unsqueeze(-1)
 
         if self._self_cond in ["tape", "latent+tape"] and tape_prev is not None:
             tape = tape + self.tape_prev_ln(self.tape_prev_proj(tape_prev))
@@ -339,13 +339,13 @@ class Rin(torch.nn.Module):
         for i in range(len(self._num_layers)):
             # pass masks to read and write units
             if self._cond_decoupled_read:
-                latent = self.read_cond_units[i](latent, tape_r, masks)
-                latent = self.read_units[i](latent, tape, masks)
+                latent = self.read_cond_units[i](latent, tape_r, masks, mode="read")
+                latent = self.read_units[i](latent, tape, masks, mode="read")
             else:
                 tape_merged = _concat_tokens(tape, tape_r)
-                latent = self.read_units[i](latent, tape_merged, masks)
+                latent = self.read_units[i](latent, tape_merged, masks, mode="read")
             latent = self.latent_processing_units[i](latent)
-            tape = self.write_units[i](tape, latent)
+            tape = self.write_units[i](tape, latent, masks, mode="write")
         return latent, tape
 
     def readout_tape(self, tape: torch.Tensor, n_rows: int, n_cols: int) -> torch.Tensor:

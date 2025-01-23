@@ -236,9 +236,21 @@ class RinDiffusionModel(torch.nn.Module):
         self,
         images: torch.Tensor,
         masks: torch.Tensor,
+        image_mask: torch.Tensor,
         labels: torch.Tensor,
         t: torch.Tensor | None = None,
     ) -> torch.Tensor:
         images, noise, _, pred_dict = self.noise_denoise(images, masks, labels, t=t)
+        # print(f'images: {images.shape}')
+        # print(f'noise: {noise.shape}')
+        # print(f'pred_noise: {pred_dict["noise_pred"].shape}')
+        # print(f'masks: {masks.shape}')
+        # print(f'image_masks: {image_mask.shape}')
+        image_mask = image_mask.unsqueeze(1)  # Add channel dim
+        image_mask = image_mask.expand(-1, 3, -1, -1)  # Expand across all 3 channels
+        images = images[image_mask]
+        noise = noise[image_mask]
+        pred_dict["noise_pred"] = pred_dict["noise_pred"][image_mask]
+        pred_dict["data_pred"] = pred_dict["data_pred"][image_mask]
         loss = self.compute_loss(images, noise, pred_dict)
         return loss
