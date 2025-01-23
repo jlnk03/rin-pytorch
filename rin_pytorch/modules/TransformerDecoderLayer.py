@@ -26,6 +26,7 @@ class TransformerDecoderLayer(torch.nn.Module):
         self.self_attention = self_attention
         self.cross_attention = cross_attention
         self.use_mlp = use_mlp
+        self.num_heads = num_heads
         
         if self_attention:
             self.self_ln = nn.LayerNorm(dim, eps=1e-6, elementwise_affine=ln_scale_shift)
@@ -78,6 +79,7 @@ class TransformerDecoderLayer(torch.nn.Module):
         x: torch.Tensor,
         enc: torch.Tensor,
         masks: torch.Tensor | None = None,
+        mode: str | None = None,
     ) -> torch.Tensor:
         if self.self_attention:
             x_ln = self.self_ln(x)
@@ -85,12 +87,31 @@ class TransformerDecoderLayer(torch.nn.Module):
             x = x + self.dropp(x_res)
             
         if self.cross_attention:
-            # print(f'x: {x.shape}, enc: {enc.shape}, masks: {masks.shape}')
+            # print(mode)
+            # print(f'x: {x.shape}, enc: {enc.shape}')
             x_ln = self.cross_ln(x)
             enc = self.enc_ln(enc)
             # print(f'x_ln: {x_ln.shape}, enc: {enc.shape}')
             # apply masks from var image sizes to cross attention only and not self attention
-            x_res, _ = self.cross_mha(query=x_ln, key=enc, value=enc, need_weights=False, key_padding_mask=masks)
+            # x_res, _ = self.cross_mha(query=x_ln, key=enc, value=enc, need_weights=False, key_padding_mask=masks)
+            # Reshape mask to (batch_size, latent_len, image_len)
+            if masks is not None:
+                # print(f'masks: {masks.shape}')
+                # Get latent length from query tensor x_ln
+                if mode == "read":
+                    # Expand mask to include latent dimension
+                    latent_len = x_ln.shape[1]
+                    masks = masks.unsqueeze(1).expand(-1, latent_len, -1)
+                    # print(f'masks inserted: {masks.shape}')
+                    # print(f'masks sum latents: {masks.sum(dim=1)}')
+                else:
+                    latent_len = enc.shape[1]
+                    masks = masks.unsqueeze(2).expand(-1, -1, latent_len)
+                masks = masks.repeat_interleave(self.num_heads, dim=0)
+                # print(f'masks repeated: {masks.shape}')
+                # Invert mask since PyTorch attention masks use True to indicate positions to mask
+                masks = ~masks.bool()
+            x_res, _ = self.cross_mha(query=x_ln, key=enc, value=enc, need_weights=False, attn_mask=masks)
             x = x + self.dropp(x_res)
             
         if self.use_mlp:

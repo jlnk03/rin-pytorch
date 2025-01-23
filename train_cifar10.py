@@ -68,8 +68,14 @@ config = dict(
         ema_update_every=1,
         sampling_kwargs=dict(iterations=100, method="ddim"),
         checkpoint_folder=f"results/cifar10/{timestamp}",
-        run_name=f"rin_flex_new_pos",
+        run_name=f"rin_std_no_mask",
         log_to_wandb=True,
+    ),
+    # Add overfit configuration
+    overfit=dict(
+        enabled=True,
+        target_class=0,
+        num_samples=10,
     ),
 )
 
@@ -84,7 +90,7 @@ ema_diffusion_model = RinDiffusionModel(rin=rin_ema, **config["diffusion"])
 
 
 class FlexibleCIFAR10(Dataset):
-    def __init__(self, root_dir, train=True, transform=None):
+    def __init__(self, root_dir, train=True, transform=None, target_class=None, num_samples=None):
         self.root_dir = Path(root_dir)
         self.split = 'train' if train else 'test'
         self.transform = transform
@@ -93,9 +99,18 @@ class FlexibleCIFAR10(Dataset):
         self.image_paths = []
         self.labels = []
         
-        for class_idx in range(10):
+        # If target_class is specified, only load that class
+        class_range = [target_class] if target_class is not None else range(10)
+        
+        for class_idx in class_range:
             class_dir = self.root_dir / self.split / str(class_idx)
-            for img_path in class_dir.glob('*.png'):
+            paths = list(class_dir.glob('*.png'))
+            
+            # If num_samples is specified, only take that many samples
+            if num_samples is not None and target_class is not None:
+                paths = paths[:num_samples]
+                
+            for img_path in paths:
                 self.image_paths.append(img_path)
                 self.labels.append(class_idx)
     
@@ -105,9 +120,6 @@ class FlexibleCIFAR10(Dataset):
     def __getitem__(self, idx):
         img_path = self.image_paths[idx]
         image = Image.open(img_path).convert('RGB')
-        # Scale image by 2x
-        w, h = image.size
-        # image = image.resize((int(w*1.5), int(h*1.5)), Image.Resampling.LANCZOS)
         label = self.labels[idx]
         
         if self.transform:
@@ -115,25 +127,58 @@ class FlexibleCIFAR10(Dataset):
             
         return image, label
 
-dataset = FlexibleCIFAR10(
-    "datasets/cifar10_flex",
-    train=True,
-    transform=transforms.Compose([
-        transforms.ToTensor(),
-        transforms.RandomHorizontalFlip(),
-    ])
-)
+# Create dataset with overfit settings if enabled
+if config["overfit"]["enabled"]:
+    dataset = FlexibleCIFAR10(
+        "datasets/cifar10_flex",
+        train=True,
+        transform=transforms.Compose([
+            transforms.ToTensor(),
+            transforms.RandomHorizontalFlip(),
+        ]),
+        target_class=config["overfit"]["target_class"],
+        num_samples=config["overfit"]["num_samples"]
+    )
+    # full_dataset = torchvision.datasets.CIFAR10(
+    #         root="datasets",
+    #         train=True,
+    #         download=True,
+    #         transform=transforms.Compose([
+    #             transforms.ToTensor(),
+    #             transforms.RandomHorizontalFlip(),
+    #         ])
+    #     )
+    
+    # Filter for target class and take only specified number of samples
+    # target_indices = [i for i, (_, label) in enumerate(full_dataset) if label == config["overfit"]["target_class"]][:config["overfit"]["num_samples"]]
+    # dataset = torch.utils.data.Subset(full_dataset, target_indices)
 
 
-# dataset = torchvision.datasets.CIFAR10(
-#     root="datasets",
-#     train=True,
-#     download=True,
-#     transform=transforms.Compose([
-#         transforms.ToTensor(),
-#         transforms.RandomHorizontalFlip(),
-#     ])
-# )
+    config["trainer"].update({
+        "train_batch_size": min(config["trainer"]["train_batch_size"], config["overfit"]["num_samples"]),
+        "train_num_steps": 50000,
+        "sample_every": 100,
+        "run_name": f"rin_overfit_new_mask_write_mask_loss_mask_class{config['overfit']['target_class']}"
+    })
+else:
+    # dataset = FlexibleCIFAR10(
+    #     "datasets/cifar10_flex",
+    #     train=True,
+    #     transform=transforms.Compose([
+    #         transforms.ToTensor(),
+    #         transforms.RandomHorizontalFlip(),
+    #     ])
+    # )
+
+    dataset = torchvision.datasets.CIFAR10(
+        root="datasets",
+        train=True,
+        download=True,
+        transform=transforms.Compose([
+            transforms.ToTensor(),
+            transforms.RandomHorizontalFlip(),
+        ])
+    )
 
 
 trainer = Trainer(
@@ -144,7 +189,9 @@ trainer = Trainer(
     **config["trainer"],
 )
 
-
 if __name__ == "__main__":
-
+    # If in overfit mode, set the sampling class
+    if config["overfit"]["enabled"]:
+        trainer.fixed_class = config["overfit"]["target_class"]
+    
     trainer.train()

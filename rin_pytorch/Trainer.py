@@ -33,6 +33,7 @@ def pad_to_max_size(batch, patch_size):
     
     padded_images = []
     patch_masks = []
+    image_masks = []
     for img in images:
         _, h, w = img.shape
         pixel_row = rearrange(img, "b h w -> b (h w)")
@@ -47,6 +48,8 @@ def pad_to_max_size(batch, patch_size):
         # Downsample pixel-level mask to patch size
         # patch_mask = avg_pool2d(patch_mask, kernel_size=patch_size, stride=patch_size)
         # only keep every patch_size * patch_size pixels
+        pixel_mask = rearrange(patch_mask, "(h w) -> h w", h=max_height, w=max_width)
+        image_masks.append(pixel_mask)
         patch_mask = patch_mask[::patch_size*patch_size]
         patch_mask = (patch_mask > 0).int()  # Convert pooled mask to binary
         patch_masks.append(patch_mask)
@@ -58,9 +61,10 @@ def pad_to_max_size(batch, patch_size):
     labels = torch.tensor(labels)
     padded_images = torch.stack(padded_images)
     patch_masks = torch.stack(patch_masks).bool()
+    image_masks = torch.stack(image_masks).bool()
     # print(f'masks.dtype: {patch_masks.dtype}')
     
-    return padded_images, patch_masks, labels
+    return padded_images, patch_masks, image_masks, labels
 
 
 def cycle(iterable):
@@ -110,6 +114,7 @@ class Trainer:
         self.ema_decay = ema_decay
         self.ema_update_every = ema_update_every
         self.sampling_kwargs = sampling_kwargs
+        self.fixed_class = None
 
         self.patch_size = patch_size
 
@@ -212,14 +217,14 @@ class Trainer:
             desc="Training",
         ) as pbar:
             while self.step < self.train_num_steps:
-                batch_img, batch_mask, batch_class = next(self.dl)
+                batch_img, batch_mask, image_mask, batch_class = next(self.dl)
                 # print(f'batch_img.shape: {batch_img.shape}')
                 # print(f'batch_mask.shape: {batch_mask.shape}')
                 batch_class = torch.nn.functional.one_hot(batch_class, num_classes=self.num_classes).float()
 
                 self.optimizer.zero_grad()
 
-                loss = self.diffusion_model(batch_img, batch_mask, batch_class)
+                loss = self.diffusion_model(batch_img, batch_mask, image_mask, batch_class)
 
                 self.accelerator.backward(loss)
 
@@ -255,11 +260,13 @@ class Trainer:
                     if self.step % self.sample_every == 0:
                         self.ema_diffusion_model.eval()
                         n = 8
+                        if self.fixed_class is not None:
+                            self.sampling_kwargs['class_override'] = self.fixed_class
                         samples = self.ema_diffusion_model.sample(num_samples=n * n, **self.sampling_kwargs)
 
                         samples = make_grid(samples, nrow=n, normalize=True, value_range=(0, 1), padding=0)
                         wandb.log({"samples": [wandb.Image(samples)]}, step=self.step)
 
                         self.save("latest")
-
                         del samples
+
