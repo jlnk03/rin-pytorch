@@ -2,6 +2,16 @@ import torchvision
 
 from rin_pytorch import Rin, RinDiffusionModel, Trainer
 
+from datetime import datetime
+
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+print(f"IMAGE_NET_PATH: {os.getenv('IMAGE_NET_PATH')}")
+
 config = dict(
     rin=dict(
         num_layers="2,2,2",
@@ -58,8 +68,8 @@ config = dict(
         ema_decay=0.9999,
         ema_update_every=1,
         sampling_kwargs=dict(iterations=100, method="ddim"),
-        checkpoint_folder="results/cifar10",
-        run_name="rin_vanilla",
+        checkpoint_folder=f"results/imagenet_{timestamp}",
+        run_name="rin_vanilla_imagenet",
         log_to_wandb=True,
     ),
 )
@@ -74,10 +84,10 @@ rin_ema.pass_dummy_data(num_classes=10)
 ema_diffusion_model = RinDiffusionModel(rin=rin_ema, **config["diffusion"])
 
 
-dataset = torchvision.datasets.CIFAR10(
-    "datasets/cifar10",
+dataset = torchvision.datasets.ImageNet(
+    root=os.getenv("IMAGE_NET_PATH"),
     train=True,
-    download=True,
+    # download=True,
     transform=torchvision.transforms.Compose(
         [
             torchvision.transforms.ToTensor(),
