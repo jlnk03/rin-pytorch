@@ -68,12 +68,12 @@ config = dict(
         ema_update_every=1,
         sampling_kwargs=dict(iterations=100, method="ddim"),
         checkpoint_folder=f"results/cifar10/{timestamp}",
-        run_name=f"rin_std_no_mask",
+        run_name=f"rin_flex_new_mask",
         log_to_wandb=True,
     ),
     # Add overfit configuration
     overfit=dict(
-        enabled=True,
+        enabled=False,
         target_class=0,
         num_samples=10,
     ),
@@ -161,24 +161,24 @@ if config["overfit"]["enabled"]:
         "run_name": f"rin_overfit_new_mask_write_mask_loss_mask_class{config['overfit']['target_class']}"
     })
 else:
-    # dataset = FlexibleCIFAR10(
-    #     "datasets/cifar10_flex",
-    #     train=True,
-    #     transform=transforms.Compose([
-    #         transforms.ToTensor(),
-    #         transforms.RandomHorizontalFlip(),
-    #     ])
-    # )
-
-    dataset = torchvision.datasets.CIFAR10(
-        root="datasets",
+    dataset = FlexibleCIFAR10(
+        "datasets/cifar10_flex",
         train=True,
-        download=True,
         transform=transforms.Compose([
             transforms.ToTensor(),
             transforms.RandomHorizontalFlip(),
         ])
     )
+
+    # dataset = torchvision.datasets.CIFAR10(
+    #     root="datasets",
+    #     train=True,
+    #     download=True,
+    #     transform=transforms.Compose([
+    #         transforms.ToTensor(),
+    #         transforms.RandomHorizontalFlip(),
+    #     ])
+    # )
 
 
 trainer = Trainer(
