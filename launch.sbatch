@@ -12,5 +12,5 @@
 
 echo "Starting the job"
 echo "Job ID: $SLURM_JOB_ID"
-srun python train_cifar10.py
+srun python train.py
 echo "Job finished"
