@@ -6,10 +6,48 @@ import torch
 from torch.utils.data import Dataset
 from datetime import datetime
 
+import webdataset as wds
+from huggingface_hub import HfFileSystem, get_token, hf_hub_url
+from torch.utils.data import IterableDataset
+
 from rin_pytorch import Rin, RinDiffusionModel, Trainer
 
 # Create timestamp string
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+class ImageNetWebDataset(IterableDataset):
+    def __init__(self, split='train', transform=None):
+        super().__init__()
+        self.transform = transform
+        
+        # Define splits pattern
+        splits_pattern = {
+            'train': '**/*-train-*.tar',
+            'validation': '**/*-validation-*.tar'
+        }
+        
+        # Setup HuggingFace filesystem
+        fs = HfFileSystem()
+        files = [fs.resolve_path(path) for path in 
+                fs.glob(f"hf://datasets/timm/imagenet-1k-wds/{splits_pattern[split]}")]
+        urls = [hf_hub_url(file.repo_id, file.path_in_repo, repo_type="dataset") 
+               for file in files]
+        
+        # Create URL string for WebDataset
+        token = get_token()
+        self.urls = f"pipe:curl -s -L -H 'Authorization:Bearer {token}' {'::'.join(urls)}"
+        
+        # Setup WebDataset pipeline
+        self.dataset = (
+            wds.WebDataset(self.urls)
+            .decode("pil")
+            .to_tuple("jpg;png;jpeg cls")
+            .map_tuple(self.transform, lambda x: int(x))
+        )
+        
+    def __iter__(self):
+        return iter(self.dataset)
+    
 
 config = dict(
     rin=dict(
@@ -39,7 +77,7 @@ config = dict(
         cond_proj=True,
         cond_decoupled_read=False,
         xattn_enc_ln=False,
-        num_classes=10,
+        num_classes=1000,
     ),
     diffusion=dict(
         train_schedule="sigmoid@-3,3,0.9",
@@ -49,7 +87,7 @@ config = dict(
         loss_type="eps",
     ),
     trainer=dict(
-        num_classes=10,
+        num_classes=1000,
         train_num_steps=150_000,
         train_batch_size=256,
         split_batches=True,
@@ -67,8 +105,8 @@ config = dict(
         ema_decay=0.9999,
         ema_update_every=1,
         sampling_kwargs=dict(iterations=100, method="ddim"),
-        checkpoint_folder=f"results/cifar10/{timestamp}",
-        run_name=f"rin_flex_reduced_train_new_mask_new_pos_emb",
+        checkpoint_folder=f"results/cifar10/{timestamp}_imagenet",
+        run_name=f"rin_flex_imagenet",
         log_to_wandb=True,
     ),
     # Add overfit configuration
@@ -165,14 +203,14 @@ if config["overfit"]["enabled"]:
         "run_name": f"rin_overfit_artifact_class{config['overfit']['target_class']}"
     })
 else:
-    dataset = FlexibleCIFAR10(
-        "datasets/cifar10_flex",
-        train=True,
-        transform=transforms.Compose([
-            transforms.ToTensor(),
-            transforms.RandomHorizontalFlip(),
-        ])
-    )
+    # dataset = FlexibleCIFAR10(
+    #     "datasets/cifar10_flex",
+    #     train=True,
+    #     transform=transforms.Compose([
+    #         transforms.ToTensor(),
+    #         transforms.RandomHorizontalFlip(),
+    #     ])
+    # )
 
     # dataset = torchvision.datasets.CIFAR10(
     #     root="datasets",
@@ -183,6 +221,14 @@ else:
     #         transforms.RandomHorizontalFlip(),
     #     ])
     # )
+
+    dataset = ImageNetWebDataset(
+        split='train',
+        transform=transforms.Compose([
+            transforms.ToTensor(),
+            transforms.RandomHorizontalFlip(),
+        ])
+    )
 
 
 trainer = Trainer(
