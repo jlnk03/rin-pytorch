@@ -12,6 +12,14 @@ def _concat_tokens(*tokens: torch.Tensor | None) -> torch.Tensor:
     # tokens in shape [..., n, d]
     return torch.cat([t for t in tokens if t is not None], -2)
 
+def patchify(x: torch.Tensor, p: int) -> torch.Tensor:
+    # N, C, H, W -> N, T, D
+    n, c, h, w = x.shape
+    nh, nw = h // p, w // p
+    x = x.view(n, c, nh, p, nw, p)
+    x = x.permute(0, 2, 4, 3, 5, 1).contiguous()
+    x = x.view(n, nh * nw, p * p * c)
+    return x
 
 class Rin(torch.nn.Module):
     def __init__(
@@ -43,6 +51,7 @@ class Rin(torch.nn.Module):
         cond_decoupled_read=False,
         xattn_enc_ln=False,
         num_classes=None,
+        pre_tokenized: bool = False,
     ):
         super().__init__()
 
@@ -185,14 +194,28 @@ class Rin(torch.nn.Module):
         self.output_ln = torch.nn.LayerNorm(tape_dim, eps=1e-6)
         self.output_linear = torch.nn.Linear(tape_dim, self._output_dim)
 
-        self.stem = torch.nn.Conv2d(
-            in_channels=image_channels,
-            out_channels=tape_dim,
-            kernel_size=patch_size,
-            stride=patch_size,
-            padding=0,
-            bias=True
+        # if pre_tokenized:
+        self.stem = torch.nn.Linear(
+            in_features=self._output_dim,
+            out_features=tape_dim,
         )
+        # self.stem = torch.nn.Conv1d(
+        #             in_channels=image_channels,
+        #             out_channels=tape_dim,
+        #             kernel_size=patch_size,
+        #             stride=patch_size,
+        #             padding=0,
+        #             bias=True
+        #         )
+        # else:
+        #     self.stem = torch.nn.Conv2d(
+        #         in_channels=image_channels,
+        #         out_channels=tape_dim,
+        #         kernel_size=patch_size,
+        #         stride=patch_size,
+        #         padding=0,
+        #         bias=True
+        #     )
 
     def make_latent_pos(
         self,
@@ -269,6 +292,9 @@ class Rin(torch.nn.Module):
         masks: torch.Tensor,
         time_emb: torch.Tensor | None,
         cond: torch.Tensor | None,
+        pos_embs: torch.Tensor | None,
+        nmh: torch.Tensor | None,
+        nmw: torch.Tensor | None,
         tape_prev: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         tape_r = None
@@ -277,37 +303,35 @@ class Rin(torch.nn.Module):
         if not self._cond_on_latent and cond is not None:
             tape_r = _concat_tokens(tape_r, cond)
 
+        # print(f'x_init: {x.shape}')
+        # Reshape 1D sequence into patches
+        # if x.ndim == 3:  # [B, L, C] format
+        #     x = rearrange(
+        #         x,
+        #         'b (h w p1 p2) c -> b (h w) (p1 p2 c)',
+        #         h=nmh,
+        #         w=nmw,
+        #         p1=self._patch_size,
+        #         p2=self._patch_size,
+        #         c=self._image_channels
+        #     )
+        # print(f'x_init_2: {x.shape}')
+        # x = rearrange(x, "b t d -> b d t")
+        # print(f'x_init_3: {x.shape}')
         tape = self.stem(x)
-        bsz, tape_dim, n_rows, n_cols = tape.shape
-
-        # Dynamically calculate positional embeddings
-        dynamic_pos_emb = create_2d_sin_cos_pos_emb(n_rows, n_cols, tape_dim)
-        dynamic_pos_emb = dynamic_pos_emb.to(tape.device)  # Move to correct device
-
-        # print(f'tape before: {tape.shape}')
-
-        tape = rearrange(tape, "b d h w -> b (h w) d")
-
-        tape_pos_emb = rearrange(dynamic_pos_emb, "n d -> 1 n d") # Broadcast to batch size
-
-        if self._tape_pos_encoding in ["sin_cos_plus_learned"]:
-            tape_pos_emb += rearrange(self.tape_pos_emb_res, "n d -> 1 n d")
-
-        tape = self.stem_ln(tape) + tape_pos_emb
-
-        # print(f'tape.shape: {tape.shape}')
-        # print(f'masks.shape: {masks.shape}')
-
-        # apply masks from var image sizes to tape
-        # if masks is not None:
-        #     tape = tape * masks.unsqueeze(-1)
+        # print(f'tape_init: {tape.shape}')
+        # tape = rearrange(tape, "b c (h w) -> b (h w) c", h=nmh, w=nmw)
+        # print(f'tape_init: {tape.shape}')
+        pos_embs = pos_embs.to(tape.device)
+        tape = self.stem_ln(tape)
+        tape += pos_embs
 
         if self._self_cond in ["tape", "latent+tape"] and tape_prev is not None:
             tape = tape + self.tape_prev_ln(self.tape_prev_proj(tape_prev))
         if self._cond_tape_writable and tape_r is not None:
             tape, tape_r = _concat_tokens(tape, tape_r), None
 
-        return tape, tape_r, n_rows, n_cols
+        return tape, tape_r
 
     def initialize_latent(
         self,
@@ -345,20 +369,22 @@ class Rin(torch.nn.Module):
                 tape_merged = _concat_tokens(tape, tape_r)
                 latent = self.read_units[i](latent, tape_merged, masks, mode="read")
             latent = self.latent_processing_units[i](latent)
-            tape = self.write_units[i](tape, latent, masks, mode="write")
+            tape = self.write_units[i](tape, latent, mode="write")
         return latent, tape
 
     def readout_tape(self, tape: torch.Tensor, n_rows: int, n_cols: int) -> torch.Tensor:
         tokens = self.output_linear(
             self.output_ln(tape[:, : n_rows * n_cols]))
-        tokens = rearrange(
-            tokens,
-            "b (h w) (p1 p2 c) -> b c (h p1) (w p2)",
-            h=n_rows,
-            w=n_cols,
-            p1=self._patch_size,
-            p2=self._patch_size,
-        )
+        # tokens = rearrange(
+        #     tokens,
+        #     # "b (h w) (p1 p2 c) -> b (h p1 w p2) c",
+        #     "b t (p1 p2 c) -> b (t p1 p2) c",
+        #     # h=n_rows,
+        #     # w=n_cols,
+        #     p1=self._patch_size,
+        #     p2=self._patch_size,
+        #     c=self._image_channels
+        # )
         return tokens
 
     @property
@@ -385,8 +411,15 @@ class Rin(torch.nn.Module):
 
         # Create dummy data
         dummy_image = torch.zeros([1, *self.image_shape], device=self.device)
+        dummy_image = patchify(dummy_image, self._patch_size)
+        # dummy_image = rearrange(dummy_image, "b c h w -> b c (h w)", h=self._image_height, w=self._image_width)
         dummy_mask = torch.ones([1, self.image_shape[-2] // self._patch_size, self.image_shape[-1] // self._patch_size], device=self.device, dtype=torch.bool)
         dummy_mask = rearrange(dummy_mask, "b h w -> b (h w)").float()
+        dummy_pos_embs = create_2d_sin_cos_pos_emb(
+            n_rows=self._n_rows,
+            n_cols=self._n_cols,
+            dim=self._tape_dim,
+        )
         dummy_label = None
         if num_classes is not None:
             dummy_label = torch.zeros([1, num_classes], device=self.device)
@@ -397,6 +430,9 @@ class Rin(torch.nn.Module):
             t=0.0,
             cond=dummy_label,
             masks=dummy_mask,
+            pos_embs=dummy_pos_embs,
+            nmh=self._n_rows,
+            nmw=self._n_cols,
         )
 
         self.train(was_training)
@@ -407,12 +443,15 @@ class Rin(torch.nn.Module):
         t: torch.Tensor | float,
         masks: torch.Tensor | None = None,
         cond: torch.Tensor | None = None,
+        pos_embs: torch.Tensor | None = None,
+        nmh: torch.Tensor | None = None,
+        nmw: torch.Tensor | None = None,
         latent_prev: torch.Tensor | None = None,
         tape_prev: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        assert x.ndim == 4
+        # assert x.ndim == 4
         bs = x.shape[0]
-
+        # print(f'pos_embs_fwd_rin: {pos_embs.shape}')
         if isinstance(t, float) or t.ndim == 0:
             t = torch.full((bs,), t, device=x.device, dtype=torch.float32)
 
@@ -426,12 +465,11 @@ class Rin(torch.nn.Module):
             raise ValueError("cond is None but cond_on_latent is True")
 
         time_emb, cond = self.initialize_cond(t, cond)
-        tape, tape_r, n_rows, n_cols = self.initialize_tape(
-            x, masks, time_emb, cond, tape_prev)
+        tape, tape_r = self.initialize_tape(
+            x, masks, time_emb, cond, pos_embs, nmh, nmw, tape_prev)
         latent = self.initialize_latent(bs, time_emb, cond, latent_prev)
         latent, tape = self.compute(latent, tape, tape_r, masks)
-        x = self.readout_tape(tape, n_rows, n_cols)
-        x = self.readout_tape(tape, n_rows, n_cols)
+        x = self.readout_tape(tape, nmh, nmw)
         return x, latent, tape[:, : self._tape_slots]
 
     def load_weights_numpy(self, np_file):

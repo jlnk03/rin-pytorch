@@ -63,6 +63,9 @@ class Scheduler:
 
     def transition_step(self, samples, data_pred, noise_pred, gamma_now, gamma_prev, sampler_name):
         """Transition to states with a smaller time step."""
+        # print(f'samples_transition: {samples.shape}', flush=True)
+        # print(f'data_pred: {data_pred.shape}', flush=True)
+        # print(f'noise_pred: {noise_pred.shape}', flush=True)
         ddpm_var_type = "large"
         if sampler_name.startswith("ddpm") and "@" in sampler_name:
             ddpm_var_type = sampler_name.split("@")[1]
@@ -225,13 +228,19 @@ def get_x0_eps(
     clip_x0=True,
 ):
     """Get x0 and eps from denoising output."""
+    # print(f'denoise_out_eps: {denoise_out.shape}', flush=True)
+    # print(f'xt_eps: {xt.shape}', flush=True)
+    # print(f'pred_type_eps: {pred_type}', flush=True)
+    # print(f'gamma_eps: {gamma.shape}', flush=True)
     if pred_type == "eps":
         noise_pred = denoise_out
         data_pred = get_x0_from_eps(xt, gamma, noise_pred)
+        # print(f'data_pred_eps: {data_pred.shape}', flush=True)
         if clip_x0:
             data_pred.clamp_(-1.0, 1.0)
         if truncate_noise:
             noise_pred = get_eps_from_x0(xt, gamma, data_pred)
+        # print(f'noise_pred_eps: {noise_pred.shape}', flush=True)
     elif pred_type.startswith("x"):
         data_pred = denoise_out
         if clip_x0:

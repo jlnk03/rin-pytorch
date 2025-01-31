@@ -15,13 +15,24 @@ from .utils.optimization_utils import (
     override_config_for_names,
 )
 
+from .utils.pos_embedding import create_2d_sin_cos_pos_emb
+
 from torch.nn.functional import pad
 
 import torch
 from torch.nn.functional import pad, avg_pool2d
 from einops import rearrange
 
-def pad_to_max_size(batch, patch_size):
+def patchify(x: torch.Tensor, p: int) -> torch.Tensor:
+    # C, H, W -> T, D
+    c, h, w = x.shape
+    nh, nw = h // p, w // p
+    x = x.view(c, nh, p, nw, p)
+    x = x.permute(1, 3, 2, 4, 0).contiguous()
+    x = x.view(nh * nw, p * p * c)
+    return x
+
+def pad_to_max_size(batch, patch_size, tape_dim):
     # Extract images and labels from the batch
     images, labels = zip(*batch)
     
@@ -30,41 +41,66 @@ def pad_to_max_size(batch, patch_size):
     max_width = max(img.shape[2] for img in images)
 
     max_pixels = max_height * max_width
+    nmh = max_height // patch_size
+    nmw = max_width // patch_size
     
     padded_images = []
     patch_masks = []
     image_masks = []
+    pos_embs = []
+    # print(f'images.shape: {images[0].shape}', flush=True)
     for img in images:
+        # print(f'img.shape: {img.shape}', flush=True)
         _, h, w = img.shape
-        pixel_row = rearrange(img, "b h w -> b (h w)")
+        nh = h // patch_size
+        nw = w // patch_size
+
+        pixel_row = patchify(img, patch_size)
+        # pixel_row = rearrange(img, "c h w -> c (h w)")
         pixel_row = pixel_row
 
-        patch_mask = torch.ones(pixel_row.shape[1])
+        pos_emb = create_2d_sin_cos_pos_emb(nh, nw, tape_dim)
+        # print(f'pos_emb.shape_1: {pos_emb.shape}', flush=True)
+
+        pixel_mask = torch.ones(h * w)
+        patch_mask = torch.ones(nh * nw)
 
         # pad to max pixels
-        pixel_row = pad(pixel_row, (0, max_pixels - pixel_row.shape[1]), value=0)
-        patch_mask = pad(patch_mask, (0, max_pixels - patch_mask.shape[0]), value=0)
+        # pixel_row = pad(pixel_row, (0, nh * nw - pixel_row.shape[0]), value=0)
+        pixel_row = pad(pixel_row, (0, 0, 0, nmh * nmw - pixel_row.shape[0]), value=0)
         
+        # pixel_row = rearrange(pixel_row, "c n -> n c")
+        pixel_mask = pad(pixel_mask, (0, max_pixels - pixel_mask.shape[0]), value=0)
+        patch_mask = pad(patch_mask, (0, nmh * nmw - patch_mask.shape[0]), value=0)
+        # Only pad the first dimension (0), leave second dimension unchanged
+        pos_emb = pad(pos_emb, (0, 0, 0, nmh * nmw - pos_emb.shape[0]), value=0)
+        # print(f'pos_emb.shape_2: {pos_emb.shape}', flush=True)
         # Downsample pixel-level mask to patch size
-        # patch_mask = avg_pool2d(patch_mask, kernel_size=patch_size, stride=patch_size)
         # only keep every patch_size * patch_size pixels
-        pixel_mask = rearrange(patch_mask, "(h w) -> h w", h=max_height, w=max_width)
+        # pixel_mask = rearrange(pixel_mask, "(h w) -> h w", h=max_height, w=max_width)
         image_masks.append(pixel_mask)
-        patch_mask = patch_mask[::patch_size*patch_size]
-        patch_mask = (patch_mask > 0).int()  # Convert pooled mask to binary
+        # patch_mask = patch_mask[::patch_size*patch_size]
+        # patch_mask = (patch_mask > 0).int()  # Convert pooled mask to binary
         patch_masks.append(patch_mask)
 
-        pixels = rearrange(pixel_row, "b (h w) -> b h w", h=max_height, w=max_width)
-        padded_images.append(pixels)
+        # pixels = rearrange(pixel_row, "b (h w) -> b h w", h=max_height, w=max_width)
+        padded_images.append(pixel_row)
+        pos_embs.append(pos_emb)
 
     # Convert labels to a tensor
     labels = torch.tensor(labels)
     padded_images = torch.stack(padded_images)
     patch_masks = torch.stack(patch_masks).bool()
     image_masks = torch.stack(image_masks).bool()
+    pos_embs = torch.stack(pos_embs)
+    # print(f'pos_embs.shape: {pos_embs.shape}', flush=True)
+    # print(f'patch_masks.shape: {patch_masks.shape}', flush=True)
+    # print('max_pixels: ', max_pixels)
+    # print('nmh: ', nmh)
+    # print('nmw: ', nmw)
     # print(f'masks.dtype: {patch_masks.dtype}')
     
-    return padded_images, patch_masks, image_masks, labels
+    return padded_images, patch_masks, image_masks, labels, pos_embs, nmh, nmw
 
 
 def cycle(iterable):
@@ -101,6 +137,7 @@ class Trainer:
         run_name="rin_16",
         log_to_wandb=True,
         patch_size=2,
+        tape_dim=256,
     ):
         self.accelerator = Accelerator(split_batches=split_batches, mixed_precision="fp16" if fp16 else "no")
         self.accelerator.native_amp = amp
@@ -117,6 +154,7 @@ class Trainer:
         self.fixed_class = None
 
         self.patch_size = patch_size
+        self.tape_dim = tape_dim
 
         dl = DataLoader(
             dataset,
@@ -126,7 +164,7 @@ class Trainer:
             pin_memory=True,
             persistent_workers=True,
             drop_last=True,
-            collate_fn=lambda batch: pad_to_max_size(batch, patch_size)
+            collate_fn=lambda batch: pad_to_max_size(batch, patch_size, tape_dim)
         )
 
         dl = self.accelerator.prepare(dl)
@@ -217,14 +255,15 @@ class Trainer:
             desc="Training",
         ) as pbar:
             while self.step < self.train_num_steps:
-                batch_img, batch_mask, image_mask, batch_class = next(self.dl)
+                batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw = next(self.dl)
                 # print(f'batch_img.shape: {batch_img.shape}')
                 # print(f'batch_mask.shape: {batch_mask.shape}')
+                # print(f'pos_embs.shape: {pos_embs.shape}')
                 batch_class = torch.nn.functional.one_hot(batch_class, num_classes=self.num_classes).float()
 
                 self.optimizer.zero_grad()
 
-                loss = self.diffusion_model(batch_img, batch_mask, image_mask, batch_class)
+                loss = self.diffusion_model(batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw)
 
                 self.accelerator.backward(loss)
 
@@ -262,7 +301,7 @@ class Trainer:
                         n = 8
                         if self.fixed_class is not None:
                             self.sampling_kwargs['class_override'] = self.fixed_class
-                        samples = self.ema_diffusion_model.sample(num_samples=n * n, **self.sampling_kwargs)
+                        samples = self.ema_diffusion_model.sample(num_samples=n * n, tape_dim=self.tape_dim, **self.sampling_kwargs)
 
                         samples = make_grid(samples, nrow=n, normalize=True, value_range=(0, 1), padding=0)
                         wandb.log({"samples": [wandb.Image(samples)]}, step=self.step)

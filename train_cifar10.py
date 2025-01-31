@@ -68,13 +68,13 @@ config = dict(
         ema_update_every=1,
         sampling_kwargs=dict(iterations=100, method="ddim"),
         checkpoint_folder=f"results/cifar10/{timestamp}",
-        run_name=f"rin_flex_new_mask",
+        run_name=f"rin_flex_reduced_train_new_mask_new_pos_emb",
         log_to_wandb=True,
     ),
     # Add overfit configuration
     overfit=dict(
-        enabled=False,
-        target_class=0,
+        enabled=True,
+        target_class=4,
         num_samples=10,
     ),
 )
@@ -90,27 +90,20 @@ ema_diffusion_model = RinDiffusionModel(rin=rin_ema, **config["diffusion"])
 
 
 class FlexibleCIFAR10(Dataset):
-    def __init__(self, root_dir, train=True, transform=None, target_class=None, num_samples=None):
+    def __init__(self, root_dir, train=True, transform=None, target_class=None, num_samples=None, ensure_vertical=False, ensure_horizontal=False):
         self.root_dir = Path(root_dir)
         self.split = 'train' if train else 'test'
         self.transform = transform
+        self.ensure_vertical = ensure_vertical  # Only ensure vertical for overfit mode
+        self.ensure_horizontal = ensure_horizontal
         
         # Get all image paths
         self.image_paths = []
         self.labels = []
-        
-        # If target_class is specified, only load that class
-        class_range = [target_class] if target_class is not None else range(10)
-        
-        for class_idx in class_range:
+
+        for class_idx in range(10):
             class_dir = self.root_dir / self.split / str(class_idx)
-            paths = list(class_dir.glob('*.png'))
-            
-            # If num_samples is specified, only take that many samples
-            if num_samples is not None and target_class is not None:
-                paths = paths[:num_samples]
-                
-            for img_path in paths:
+            for img_path in class_dir.glob('*.png'):
                 self.image_paths.append(img_path)
                 self.labels.append(class_idx)
     
@@ -121,6 +114,15 @@ class FlexibleCIFAR10(Dataset):
         img_path = self.image_paths[idx]
         image = Image.open(img_path).convert('RGB')
         label = self.labels[idx]
+        
+        # Check if image needs rotation
+        width, height = image.size
+        if self.ensure_vertical:
+            if width > height:
+                image = image.rotate(90, expand=True)
+        elif self.ensure_horizontal and not self.ensure_vertical:
+            if height > width:
+                image = image.rotate(90, expand=True)
         
         if self.transform:
             image = self.transform(image)
@@ -137,9 +139,11 @@ if config["overfit"]["enabled"]:
             transforms.RandomHorizontalFlip(),
         ]),
         target_class=config["overfit"]["target_class"],
-        num_samples=config["overfit"]["num_samples"]
+        num_samples=config["overfit"]["num_samples"],
+        ensure_vertical=False,
+        ensure_horizontal=True
     )
-    # full_dataset = torchvision.datasets.CIFAR10(
+    # dataset = torchvision.datasets.CIFAR10(
     #         root="datasets",
     #         train=True,
     #         download=True,
@@ -150,15 +154,15 @@ if config["overfit"]["enabled"]:
     #     )
     
     # Filter for target class and take only specified number of samples
-    # target_indices = [i for i, (_, label) in enumerate(full_dataset) if label == config["overfit"]["target_class"]][:config["overfit"]["num_samples"]]
-    # dataset = torch.utils.data.Subset(full_dataset, target_indices)
+    target_indices = [i for i, (_, label) in enumerate(dataset) if label == config["overfit"]["target_class"]][:config["overfit"]["num_samples"]]
+    dataset = torch.utils.data.Subset(dataset, target_indices)
 
 
     config["trainer"].update({
         "train_batch_size": min(config["trainer"]["train_batch_size"], config["overfit"]["num_samples"]),
         "train_num_steps": 50000,
         "sample_every": 100,
-        "run_name": f"rin_overfit_new_mask_write_mask_loss_mask_class{config['overfit']['target_class']}"
+        "run_name": f"rin_overfit_artifact_class{config['overfit']['target_class']}"
     })
 else:
     dataset = FlexibleCIFAR10(
@@ -186,6 +190,7 @@ trainer = Trainer(
     ema_diffusion_model,
     dataset,
     patch_size=config["rin"]["patch_size"],
+    tape_dim=config["rin"]["tape_dim"],
     **config["trainer"],
 )
 
