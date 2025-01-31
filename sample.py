@@ -13,7 +13,9 @@ def generate_batch(model, batch_size, iterations, method, class_label=None):
             num_samples=batch_size,
             iterations=iterations,
             method=method,
-            class_override=class_label if class_label is not None else None
+            class_override=class_label if class_label is not None else None,
+            image_height=32,
+            image_width=64
         )
     return samples
 
@@ -49,7 +51,7 @@ def main():
         image_channels=3,
         patch_size=2,
         latent_pos_encoding="learned",
-        tape_pos_encoding="sin_cos",
+        tape_pos_encoding="learned",
         drop_path=0.1,
         drop_units=0.1,
         drop_att=0.0,

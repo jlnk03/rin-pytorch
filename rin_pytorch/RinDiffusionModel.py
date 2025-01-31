@@ -17,6 +17,14 @@ def patchify(x: torch.Tensor, p: int) -> torch.Tensor:
     x = x.view(n, nh * nw, p * p * c)
     return x
 
+def unpatchify(x: torch.Tensor, nh: int, nw: int, p: int, c: int) -> torch.Tensor:
+    # N, T, D -> N, C, H, W
+    n, _, _ = x.shape
+    x = x.view(n, nh, nw, p, p, c)
+    x = x.permute(0, 5, 1, 3, 2, 4).contiguous()
+    x = x.view(n, c, nh * p, nw * p)
+    return x
+
 class RinDiffusionModel(torch.nn.Module):
     def __init__(
         self,
@@ -71,6 +79,8 @@ class RinDiffusionModel(torch.nn.Module):
         seed: int | None = None,
         class_override: int | None = None,
         mask: torch.Tensor | None = None,
+        image_height: int = 32,
+        image_width: int = 32,
     ):
         """
         Generate samples using the given diffusion model.
@@ -89,7 +99,7 @@ class RinDiffusionModel(torch.nn.Module):
             (samples) Generated images in [0, 1].
         """
         device = self.denoiser.device
-        image_shape = self.denoiser.image_shape  # [C, H, W]
+        image_shape = [self.denoiser._image_channels, image_height, image_width]  # [C, H, W]
         patch_size = self.denoiser._patch_size
         nmh = image_shape[1] // patch_size
         nmw = image_shape[2] // patch_size
@@ -210,8 +220,8 @@ class RinDiffusionModel(torch.nn.Module):
         samples = data_pred * 0.5 + 0.5
         samples.clamp_(0.0, 1.0)
 
-        samples = rearrange(samples, "b (h w) (c p1 p2) -> b c (h p1) (w p2)", h=image_shape[1]//patch_size, w=image_shape[2]//patch_size, p1=patch_size, p2=patch_size)
-
+        # samples = rearrange(samples, "b (h w) (c p1 p2) -> b c (h p1) (w p2)", h=image_shape[1]//patch_size, w=image_shape[2]//patch_size, p1=patch_size, p2=patch_size)
+        samples = unpatchify(samples, nmh, nmw, patch_size, image_shape[0])
         return samples
 
     def noise_denoise(

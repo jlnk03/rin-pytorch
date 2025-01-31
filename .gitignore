@@ -182,3 +182,5 @@ cifar10/
 datasets/
 
 wandb/
+
+output/
