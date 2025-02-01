@@ -21,30 +21,6 @@ def patchify(x: torch.Tensor, p: int) -> torch.Tensor:
     x = x.view(n, nh * nw, p * p * c)
     return x
 
-def create_random_token_mask(x: torch.Tensor, mask_ratio: float = 0.5) -> torch.Tensor:
-    """
-    Creates a random boolean mask for the given tensor x.
-    
-    For each sample in the batch (dimension b), this function randomly selects
-    (approximately) mask_ratio of tokens along the t dimension and applies the same
-    mask across all channels (dimension c).
-    
-    Args:
-        x (torch.Tensor): Input tensor with shape [b, t, c].
-        mask_ratio (float): The fraction of tokens to be masked out.
-                             Default is 0.5 (50%).
-    
-    Returns:
-        torch.Tensor: A boolean mask of shape [b, t, c] where True indicates
-                      the token (across all channels) should be masked.
-    """
-    b, t, c = x.shape
-    # Generate mask along the token dimension: True where token should be dropped.
-    token_mask = torch.rand(b, t, device=x.device) < mask_ratio
-    # Expand mask to all channels.
-    mask = token_mask.unsqueeze(-1).expand(b, t, c)
-    return mask
-
 class Rin(torch.nn.Module):
     def __init__(
         self,
@@ -76,6 +52,7 @@ class Rin(torch.nn.Module):
         xattn_enc_ln=False,
         num_classes=None,
         pre_tokenized: bool = False,
+        mask_ratio: float = 0.5,
     ):
         super().__init__()
 
@@ -87,6 +64,7 @@ class Rin(torch.nn.Module):
         self._num_tokens = self._n_rows * self._n_cols
         self._patch_size = patch_size
         self._output_dim = patch_size**2 * image_channels
+        self.mask_ratio = mask_ratio
 
         self._num_layers = [int(i) for i in num_layers.split(",")]
         self._latent_slots = latent_slots
@@ -327,9 +305,6 @@ class Rin(torch.nn.Module):
         if not self._cond_on_latent and cond is not None:
             tape_r = _concat_tokens(tape_r, cond)
 
-        masking_ratio = 0.5
-        mask = create_random_token_mask(x, masking_ratio)
-        x = x.masked_fill(mask, 0)
         tape = self.stem(x)
 
         pos_embs = pos_embs.to(tape.device)

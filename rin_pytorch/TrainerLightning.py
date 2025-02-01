@@ -31,6 +31,32 @@ from diffusers.optimization import get_scheduler as get_lr_scheduler
 
 load_dotenv()
 
+def create_random_token_mask(x: torch.Tensor, mask_ratio: float = 0.5) -> torch.Tensor:
+    """
+    Creates a random boolean mask for the given tensor x such that each sample
+    in the batch has exactly 'mask_ratio' fraction of its tokens masked.
+
+    Args:
+        x (torch.Tensor): Input tensor of shape [b, t, c].
+        mask_ratio (float): Fraction of tokens to mask in each sample.
+    
+    Returns:
+        A tuple of boolean masks (expanded to [b, t, c] for tokens) where the 
+        inverted mask (~mask) can be used to select visible tokens.
+    """
+    b, t, c = x.shape
+    num_mask = int(mask_ratio * t)
+    
+    rand_scores = torch.rand(b, t, device=x.device)
+    _, indices = torch.topk(rand_scores, k=num_mask, dim=1, largest=False)
+    
+    token_mask = torch.zeros((b, t), dtype=torch.bool, device=x.device)
+    token_mask.scatter_(1, indices, True)
+    
+    mask = token_mask.unsqueeze(-1).expand(b, t, c)
+
+    return mask, token_mask
+
 class ResizeMaxSide:
     def __init__(self, max_side, interpolation=Image.BILINEAR):
         self.max_side = max_side
@@ -53,44 +79,7 @@ class ImageNetWebDataset(IterableDataset):
     def __init__(self, split='train', transform=None):
         super().__init__()
         self.transform = transform
-        
-        # Define splits pattern
-        # splits_pattern = {
-        #     'train': '**/*-train-*.tar',
-        #     'validation': '**/*-validation-*.tar'
-        # }
-        
-        # # Setup HuggingFace filesystem
-        # fs = HfFileSystem()
-        # files = [fs.resolve_path(path) for path in 
-        #         fs.glob(f"hf://datasets/timm/imagenet-1k-wds/{splits_pattern[split]}")]
-        # urls = [hf_hub_url(file.repo_id, file.path_in_repo, repo_type="dataset") 
-        #        for file in files]
-        
-        # # Create URL string for WebDataset
-        # token = get_token()
-        # self.urls = f"pipe:curl -s -L -H 'Authorization:Bearer {token}' {'::'.join(urls)}"
-        
-        # # Setup WebDataset pipeline
-        # self.dataset = (
-        #     wds.WebDataset(urls, nodesplitter=wds.split_by_node, num_workers=4)
-        #     .decode("pil")
-        #     .to_tuple("jpg;png;jpeg cls")
-        #     .map_tuple(self.transform, lambda x: int(x))
-        # )
 
-        # splits = {'train': '**/*-train-*.tar', 'validation': '**/*-validation-*.tar'}
-
-        # # Login using e.g. `huggingface-cli login` to access this dataset
-        # fs = HfFileSystem()
-        # files = [fs.resolve_path(path) for path in fs.glob("hf://datasets/timm/imagenet-1k-wds/" + splits["train"])]
-        # urls = [hf_hub_url(file.repo_id, file.path_in_repo, repo_type="dataset") for file in files]
-        # urls = f"pipe: curl -s -L -H 'Authorization:Bearer {get_token()}' {'::'.join(urls)}"
-
-        # self.dataset = wds.WebDataset(urls, nodesplitter=wds.split_by_node).decode()
-
-        print(os.getenv("IMAGE_NET_PATH"))
-        print(os.getenv("HF_HUB_CACHE"))
         try:
             self.dataset = load_dataset("imagenet-1k", split="train", trust_remote_code=True)
         except Exception as e:
@@ -111,8 +100,6 @@ def patchify(x: torch.Tensor, p: int) -> torch.Tensor:
 
 
 def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
-    # Extract images and labels from the batch
-    # images, labels = zip(*batch)
     images = []
     labels = []
     for example in batch:
@@ -122,7 +109,6 @@ def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
     if transform:
         images = [transform(img) for img in images]
     
-    # Find the maximum height and width in the batch
     max_height = max(img.shape[1] for img in images)
     max_width = max(img.shape[2] for img in images)
 
@@ -137,14 +123,12 @@ def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
     for img in images:
         c, h, w = img.shape
 
-        # Calculate how many pixels to crop to make dimensions divisible by patch_size
         h_crop = h - (h // patch_size) * patch_size
         w_crop = w - (w // patch_size) * patch_size
         
-        # Crop the image if needed
         if h_crop > 0 or w_crop > 0:
-            img = img[:, :h-h_crop, :w-w_crop]
-            _, h, w = img.shape  # Update dimensions after cropping
+            img = img[:, :h - h_crop, :w - w_crop]
+            _, h, w = img.shape
 
         if c == 1:
             img = img.repeat(3, 1, 1)
@@ -152,34 +136,45 @@ def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
         nh = h // patch_size
         nw = w // patch_size
         pixel_row = patchify(img, patch_size)
-        pixel_row = pixel_row
-
+        
         pos_emb = create_2d_sin_cos_pos_emb(nh, nw, tape_dim)
 
         pixel_mask = torch.ones(h * w)
         patch_mask = torch.ones(nh * nw)
 
-        # pad to max pixels
+        # Pad to max tokens / max patches for consistency across the batch
         pixel_row = torch.nn.functional.pad(pixel_row, (0, 0, 0, nmh * nmw - pixel_row.shape[0]), value=0)
-        
         pixel_mask = torch.nn.functional.pad(pixel_mask, (0, max_pixels - pixel_mask.shape[0]), value=0)
         patch_mask = torch.nn.functional.pad(patch_mask, (0, nmh * nmw - patch_mask.shape[0]), value=0)
-        # Only pad the first dimension (0), leave second dimension unchanged
         pos_emb = torch.nn.functional.pad(pos_emb, (0, 0, 0, nmh * nmw - pos_emb.shape[0]), value=0)
+        
         image_masks.append(pixel_mask)
         patch_masks.append(patch_mask)
-
         padded_images.append(pixel_row)
         pos_embs.append(pos_emb)
 
-    # Convert labels to a tensor and move to GPU
     labels = torch.tensor(labels)
     padded_images = torch.stack(padded_images)
     patch_masks = torch.stack(patch_masks).bool()
     image_masks = torch.stack(image_masks).bool()
     pos_embs = torch.stack(pos_embs)
+
+    _, token_mask = create_random_token_mask(padded_images, mask_ratio=0.5)
     
-    return padded_images, patch_masks, image_masks, labels, pos_embs, nmh, nmw
+    visible_padded_images = []
+    visible_patch_masks = []
+    visible_pos_embs = []
+    for i in range(padded_images.size(0)):
+        visible_idx = ~token_mask[i]
+        visible_padded_images.append(padded_images[i][visible_idx])
+        visible_patch_masks.append(patch_masks[i][visible_idx])
+        visible_pos_embs.append(pos_embs[i][visible_idx])
+    
+    visible_padded_images = torch.stack(visible_padded_images)
+    visible_patch_masks = torch.stack(visible_patch_masks)
+    visible_pos_embs = torch.stack(visible_pos_embs)
+    
+    return visible_padded_images, visible_patch_masks, image_masks, labels, visible_pos_embs, nmh, nmw
 
 
 class ImageNetDataModule(LightningDataModule):
@@ -249,13 +244,8 @@ class RinLightningModule(LightningModule):
         self.manual_backward(loss)
         opt.step()
 
-        # Update learning rate
         sch = self.lr_schedulers()
         sch.step()
-
-        # Log metrics
-        # self.log("train_loss", loss, on_step=True, prog_bar=True)
-        # self.log("lr", opt.param_groups[0]["lr"], on_step=True, prog_bar=True)
 
         logs = {
             "loss": loss.item(),
