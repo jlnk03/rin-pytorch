@@ -23,6 +23,12 @@ import torch
 from torch.nn.functional import pad, avg_pool2d
 from einops import rearrange
 
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
 def patchify(x: torch.Tensor, p: int) -> torch.Tensor:
     # C, H, W -> T, D
     c, h, w = x.shape
@@ -48,42 +54,38 @@ def pad_to_max_size(batch, patch_size, tape_dim):
     patch_masks = []
     image_masks = []
     pos_embs = []
-    # print(f'images.shape: {images[0].shape}', flush=True)
     for img in images:
-        # print(f'img.shape: {img.shape}', flush=True)
         _, h, w = img.shape
+        
+        # Calculate how many pixels to crop to make dimensions divisible by patch_size
+        h_crop = h - (h // patch_size) * patch_size
+        w_crop = w - (w // patch_size) * patch_size
+        
+        # Crop the image if needed
+        if h_crop > 0 or w_crop > 0:
+            img = img[:, :h-h_crop, :w-w_crop]
+            _, h, w = img.shape  # Update dimensions after cropping
+        
         nh = h // patch_size
         nw = w // patch_size
-
         pixel_row = patchify(img, patch_size)
-        # pixel_row = rearrange(img, "c h w -> c (h w)")
         pixel_row = pixel_row
 
         pos_emb = create_2d_sin_cos_pos_emb(nh, nw, tape_dim)
-        # print(f'pos_emb.shape_1: {pos_emb.shape}', flush=True)
 
         pixel_mask = torch.ones(h * w)
         patch_mask = torch.ones(nh * nw)
 
         # pad to max pixels
-        # pixel_row = pad(pixel_row, (0, nh * nw - pixel_row.shape[0]), value=0)
         pixel_row = pad(pixel_row, (0, 0, 0, nmh * nmw - pixel_row.shape[0]), value=0)
         
-        # pixel_row = rearrange(pixel_row, "c n -> n c")
         pixel_mask = pad(pixel_mask, (0, max_pixels - pixel_mask.shape[0]), value=0)
         patch_mask = pad(patch_mask, (0, nmh * nmw - patch_mask.shape[0]), value=0)
         # Only pad the first dimension (0), leave second dimension unchanged
         pos_emb = pad(pos_emb, (0, 0, 0, nmh * nmw - pos_emb.shape[0]), value=0)
-        # print(f'pos_emb.shape_2: {pos_emb.shape}', flush=True)
-        # Downsample pixel-level mask to patch size
-        # only keep every patch_size * patch_size pixels
-        # pixel_mask = rearrange(pixel_mask, "(h w) -> h w", h=max_height, w=max_width)
         image_masks.append(pixel_mask)
-        # patch_mask = patch_mask[::patch_size*patch_size]
-        # patch_mask = (patch_mask > 0).int()  # Convert pooled mask to binary
         patch_masks.append(patch_mask)
 
-        # pixels = rearrange(pixel_row, "b (h w) -> b h w", h=max_height, w=max_width)
         padded_images.append(pixel_row)
         pos_embs.append(pos_emb)
 
@@ -93,12 +95,6 @@ def pad_to_max_size(batch, patch_size, tape_dim):
     patch_masks = torch.stack(patch_masks).bool()
     image_masks = torch.stack(image_masks).bool()
     pos_embs = torch.stack(pos_embs)
-    # print(f'pos_embs.shape: {pos_embs.shape}', flush=True)
-    # print(f'patch_masks.shape: {patch_masks.shape}', flush=True)
-    # print('max_pixels: ', max_pixels)
-    # print('nmh: ', nmh)
-    # print('nmw: ', nmw)
-    # print(f'masks.dtype: {patch_masks.dtype}')
     
     return padded_images, patch_masks, image_masks, labels, pos_embs, nmh, nmw
 
@@ -133,7 +129,7 @@ class Trainer:
         ema_decay=0.9999,
         ema_update_every=1,
         sampling_kwargs=dict(iterations=100, method="ddim"),
-        checkpoint_folder="results",
+        checkpoint_folder=os.getenv("CHECKPOINT_PATH"),
         run_name="rin_16",
         log_to_wandb=True,
         patch_size=2,
@@ -159,7 +155,7 @@ class Trainer:
         dl = DataLoader(
             dataset,
             batch_size=train_batch_size,
-            shuffle=True,
+            # shuffle=True,
             num_workers=num_dl_workers,
             pin_memory=True,
             persistent_workers=True,
@@ -256,9 +252,6 @@ class Trainer:
         ) as pbar:
             while self.step < self.train_num_steps:
                 batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw = next(self.dl)
-                # print(f'batch_img.shape: {batch_img.shape}')
-                # print(f'batch_mask.shape: {batch_mask.shape}')
-                # print(f'pos_embs.shape: {pos_embs.shape}')
                 batch_class = torch.nn.functional.one_hot(batch_class, num_classes=self.num_classes).float()
 
                 self.optimizer.zero_grad()

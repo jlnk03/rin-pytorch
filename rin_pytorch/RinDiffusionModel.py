@@ -33,7 +33,7 @@ class RinDiffusionModel(torch.nn.Module):
         inference_schedule: str,
         pred_type: str,
         self_cond: str = "none",
-        num_classes: int = 10,
+        num_classes: int = 1000,
         conditional: str = "class",
         self_cond_rate: float = 0.9,
         loss_type: str = "x",

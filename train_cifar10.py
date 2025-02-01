@@ -62,7 +62,7 @@ config = dict(
         image_height=32,
         image_width=32,
         image_channels=3,
-        patch_size=2,
+        patch_size=4,
         latent_pos_encoding="learned",
         tape_pos_encoding="learned",
         drop_path=0.1,
@@ -88,8 +88,8 @@ config = dict(
     ),
     trainer=dict(
         num_classes=1000,
-        train_num_steps=150_000,
-        train_batch_size=256,
+        train_num_steps=600_000,
+        train_batch_size=128,
         split_batches=True,
         fp16=False,
         amp=False,
@@ -105,13 +105,13 @@ config = dict(
         ema_decay=0.9999,
         ema_update_every=1,
         sampling_kwargs=dict(iterations=100, method="ddim"),
-        checkpoint_folder=f"results/cifar10/{timestamp}_imagenet",
-        run_name=f"rin_flex_imagenet",
+        checkpoint_folder=f"results/cifar10/{timestamp}_cifar",
+        run_name=f"rin_flex_imagenet_full",
         log_to_wandb=True,
     ),
     # Add overfit configuration
     overfit=dict(
-        enabled=True,
+        enabled=False,
         target_class=4,
         num_samples=10,
     ),
@@ -119,11 +119,11 @@ config = dict(
 
 
 rin = Rin(**config["rin"]).cuda()
-rin.pass_dummy_data(num_classes=10)  # populate lazy model with weights
+rin.pass_dummy_data(num_classes=1000)  # populate lazy model with weights
 diffusion_model = RinDiffusionModel(rin=rin, **config["diffusion"])
 
 rin_ema = Rin(**config["rin"]).cuda()
-rin_ema.pass_dummy_data(num_classes=10)
+rin_ema.pass_dummy_data(num_classes=1000)
 ema_diffusion_model = RinDiffusionModel(rin=rin_ema, **config["diffusion"])
 
 
@@ -203,14 +203,14 @@ if config["overfit"]["enabled"]:
         "run_name": f"rin_overfit_artifact_class{config['overfit']['target_class']}"
     })
 else:
-    # dataset = FlexibleCIFAR10(
-    #     "datasets/cifar10_flex",
-    #     train=True,
-    #     transform=transforms.Compose([
-    #         transforms.ToTensor(),
-    #         transforms.RandomHorizontalFlip(),
-    #     ])
-    # )
+    dataset = FlexibleCIFAR10(
+        "datasets/cifar10_flex",
+        train=True,
+        transform=transforms.Compose([
+            transforms.ToTensor(),
+            transforms.RandomHorizontalFlip(),
+        ])
+    )
 
     # dataset = torchvision.datasets.CIFAR10(
     #     root="datasets",
@@ -222,13 +222,13 @@ else:
     #     ])
     # )
 
-    dataset = ImageNetWebDataset(
-        split='train',
-        transform=transforms.Compose([
-            transforms.ToTensor(),
-            transforms.RandomHorizontalFlip(),
-        ])
-    )
+    # dataset = ImageNetWebDataset(
+    #     split='train',
+    #     transform=transforms.Compose([
+    #         transforms.ToTensor(),
+    #         transforms.RandomHorizontalFlip(),
+    #     ])
+    # )
 
 
 trainer = Trainer(
