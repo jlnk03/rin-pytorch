@@ -187,7 +187,7 @@ class ImageNetDataModule(LightningDataModule):
         super().__init__()
         self.config = config
         self.transform = transforms.Compose([
-            ResizeMaxSide(256),
+            transforms.Resize((128, 128)) if self.config["run"]["vanilla"] else ResizeMaxSide(128),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
         ])
@@ -220,11 +220,11 @@ class RinLightningModule(LightningModule):
         self.automatic_optimization = False
         
         self.rin = Rin(**rin_config)
-        self.rin.pass_dummy_data(num_classes=config["trainer"]["num_classes"])  # Populate lazy model with weights
+        self.rin.pass_dummy_data(num_classes=rin_config["num_classes"])  # Populate lazy model with weights
         self.diffusion_model = RinDiffusionModel(rin=self.rin, **diffusion_config)
         
         self.rin_ema = Rin(**rin_config)
-        self.rin_ema.pass_dummy_data(num_classes=config["trainer"]["num_classes"])
+        self.rin_ema.pass_dummy_data(num_classes=rin_config["num_classes"])
         self.ema_diffusion_model = RinDiffusionModel(rin=self.rin_ema, **diffusion_config)
         self.ema_decay = config["trainer"]["ema_decay"]
         self.ema_update_every = config["trainer"]["ema_update_every"]
@@ -232,7 +232,7 @@ class RinLightningModule(LightningModule):
         self.sample_every = config["trainer"]["sample_every"]
         self.sampling_kwargs = config["trainer"]["sampling_kwargs"]
         self.tape_dim = rin_config["tape_dim"]
-        self.num_classes = config["trainer"]["num_classes"]
+        self.num_classes = rin_config["num_classes"]
         self.patch_size = rin_config["patch_size"]
     
     def forward(self, batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw):
