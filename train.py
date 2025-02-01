@@ -74,8 +74,8 @@ def main():
             ema_decay=0.9999,
             ema_update_every=1,
             sampling_kwargs=dict(iterations=100, method="ddim"),
-            checkpoint_folder=f"results/imagenet/{timestamp}",
-            run_name=f"rin_imagenet_full",
+            checkpoint_folder=f"results/imagenet/masking_ratio_0.5_{timestamp}",
+            run_name=f"masking_ratio_0.5",
             log_to_wandb=True,
         ),
     )
