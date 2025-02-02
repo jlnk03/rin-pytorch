@@ -22,6 +22,10 @@ def main():
     parser = argparse.ArgumentParser(description="Rin Training Script")
     parser.add_argument("--config", type=str, default="configs/default.yaml",
                         help="Path to the configuration YAML file.")
+    parser.add_argument("--resume_checkpoint", type=str, default=None,
+                        help="Path to a checkpoint to resume training from.")
+    parser.add_argument("--wandb_resume", type=str, default=None,
+                        help="Wandb resume flag or run id to resume an existing run.")
     args = parser.parse_args()
     
     config = load_config(args.config)
@@ -33,19 +37,22 @@ def main():
     data_module = ImageNetDataModule(config)
     model = RinLightningModule(config)
     
-    # Initialize WandB logger if applicable
-    wandb_logger = WandbLogger(
-        project="rin",
-        name=config["trainer"]["run_name"],
-        log_model=False
-    ) if config["trainer"]["log_to_wandb"] else None
+    # Initialize WandB logger if applicable, with resume functionality
+    wandb_logger = None
+    if config["trainer"]["log_to_wandb"]:
+        wandb_logger = WandbLogger(
+            project="rin",
+            name=config["trainer"]["run_name"],
+            log_model=False,
+            id=args.wandb_resume,
+            resume=True if args.wandb_resume else False
+        )
     
     # Setup callbacks
     checkpoint_callback = ModelCheckpoint(
         dirpath=config["trainer"]["checkpoint_folder"],
         filename="model-{step}",
         every_n_train_steps=config["trainer"]["sample_every"],
-        save_weights_only=True,
         save_top_k=1,
         save_last=True
     )
@@ -63,7 +70,8 @@ def main():
         strategy='ddp_find_unused_parameters_true' if torch.cuda.device_count() > 1 else "auto",
     )
     
-    trainer.fit(model, datamodule=data_module)
+    # Pass the resume checkpoint path to trainer.fit() to resume from a given checkpoint
+    trainer.fit(model, datamodule=data_module, ckpt_path=args.resume_checkpoint)
 
 if __name__ == "__main__":
     main()
