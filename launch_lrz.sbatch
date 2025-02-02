@@ -7,7 +7,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=4
 #SBATCH --gres=gpu:4
-#SBATCH --mem=128G
+#SBATCH --mem=256G
 #SBATCH --time=6-00:00:00
 
 echo "Starting the job"
