@@ -8,7 +8,7 @@
 #SBATCH --ntasks-per-node=4
 #SBATCH --gres=gpu:4
 #SBATCH --mem=128G
-#SBATCH --time=4-00:00:00
+#SBATCH --time=6-00:00:00
 
 echo "Starting the job"
 echo "Job ID: $SLURM_JOB_ID"
