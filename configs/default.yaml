@@ -60,3 +60,6 @@ trainer:
   checkpoint_folder: "results/imagenet/"
   run_name: "imagenet_flex"
   log_to_wandb: true 
+
+run:
+  vanilla: false

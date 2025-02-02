@@ -115,12 +115,19 @@ def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
     # images, labels = zip(*batch)
     images = []
     labels = []
+
     for example in batch:
+        if example["image"].mode == "RGBA":
+            print(f"Warning: Image has 4 channels (RGBA), converting to 3")
+            example["image"] = example["image"].convert("RGB")
+        if transform:
+            example["image"] = transform(example["image"])
+        c, _, _ = example["image"].shape
+        if c > 3:
+            print(f"Warning: Image has {c} channels, truncating to 3")
+            example["image"] = example["image"][:3]
         images.append(example["image"])
         labels.append(example["label"])
-
-    if transform:
-        images = [transform(img) for img in images]
     
     # Find the maximum height and width in the batch
     max_height = max(img.shape[1] for img in images)
