@@ -53,44 +53,7 @@ class ImageNetWebDataset(IterableDataset):
     def __init__(self, split='train', transform=None):
         super().__init__()
         self.transform = transform
-        
-        # Define splits pattern
-        # splits_pattern = {
-        #     'train': '**/*-train-*.tar',
-        #     'validation': '**/*-validation-*.tar'
-        # }
-        
-        # # Setup HuggingFace filesystem
-        # fs = HfFileSystem()
-        # files = [fs.resolve_path(path) for path in 
-        #         fs.glob(f"hf://datasets/timm/imagenet-1k-wds/{splits_pattern[split]}")]
-        # urls = [hf_hub_url(file.repo_id, file.path_in_repo, repo_type="dataset") 
-        #        for file in files]
-        
-        # # Create URL string for WebDataset
-        # token = get_token()
-        # self.urls = f"pipe:curl -s -L -H 'Authorization:Bearer {token}' {'::'.join(urls)}"
-        
-        # # Setup WebDataset pipeline
-        # self.dataset = (
-        #     wds.WebDataset(urls, nodesplitter=wds.split_by_node, num_workers=4)
-        #     .decode("pil")
-        #     .to_tuple("jpg;png;jpeg cls")
-        #     .map_tuple(self.transform, lambda x: int(x))
-        # )
 
-        # splits = {'train': '**/*-train-*.tar', 'validation': '**/*-validation-*.tar'}
-
-        # # Login using e.g. `huggingface-cli login` to access this dataset
-        # fs = HfFileSystem()
-        # files = [fs.resolve_path(path) for path in fs.glob("hf://datasets/timm/imagenet-1k-wds/" + splits["train"])]
-        # urls = [hf_hub_url(file.repo_id, file.path_in_repo, repo_type="dataset") for file in files]
-        # urls = f"pipe: curl -s -L -H 'Authorization:Bearer {get_token()}' {'::'.join(urls)}"
-
-        # self.dataset = wds.WebDataset(urls, nodesplitter=wds.split_by_node).decode()
-
-        print(os.getenv("IMAGE_NET_PATH"))
-        print(os.getenv("HF_HUB_CACHE"))
         try:
             self.dataset = load_dataset("imagenet-1k", split="train", trust_remote_code=True)
         except Exception as e:
@@ -329,3 +292,11 @@ class RinLightningModule(LightningModule):
                 "frequency": 1,
             }
         }
+    
+    def on_save_checkpoint(self, checkpoint):
+        checkpoint["ema_model"] = self.ema_diffusion_model.state_dict()
+        return checkpoint
+
+    def on_load_checkpoint(self, checkpoint):
+        if "ema_model" in checkpoint:
+            self.ema_diffusion_model.load_state_dict(checkpoint["ema_model"])
