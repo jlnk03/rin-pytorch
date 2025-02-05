@@ -33,12 +33,14 @@ diffusion:
   pred_type: "eps"
   self_cond: "latent"
   loss_type: "eps"
+  num_classes: 10
 
 trainer:
+  num_classes: 10
   train_num_steps: 150000
   train_batch_size: 256
   split_batches: true
-  fp16: true
+  fp16: false
   amp: false
   lr_scheduler_name: "cosine"
   lr: 0.003
@@ -51,13 +53,13 @@ trainer:
     eps: !!float 1e-8
   clip_grad_norm: null
   sample_every: 1000
-  num_dl_workers: 4
+  num_dl_workers: 2
   ema_decay: 0.9999
   ema_update_every: 1
   sampling_kwargs:
     iterations: 100
     method: "ddim"
-  checkpoint_folder: "/dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/imagenet/"
+  checkpoint_folder: "/dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/cifar/"
   run_name: "cifar_flex"
   log_to_wandb: true 
 

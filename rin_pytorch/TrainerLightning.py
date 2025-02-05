@@ -165,7 +165,7 @@ class ImageNetDataModule(LightningDataModule):
             ])
         else:
             self.transform = transforms.Compose([
-                transforms.Resize((128, 128)) if self.config["run"]["vanilla"] else ResizeMaxSide(128),
+                transforms.Resize((128, 128)) if self.config["run"]["vanilla"] else ResizeMaxSide(64),
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
             ])

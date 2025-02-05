@@ -35,43 +35,44 @@ def main():
     config["trainer"]["checkpoint_folder"] = f"{config['trainer']['checkpoint_folder']}{config['trainer']['run_name']}_{timestamp}"
     
     data_module = ImageNetDataModule(config)
+    
     model = RinLightningModule(config)
     
-    # Initialize WandB logger if applicable, with resume functionality
-    wandb_logger = None
-    if config["trainer"]["log_to_wandb"]:
-        wandb_logger = WandbLogger(
-            project="rin",
-            name=config["trainer"]["run_name"],
-            log_model=False,
-            id=args.wandb_resume,
-            resume=True if args.wandb_resume else False
-        )
+    # Initialize WandB logger
+    wandb_logger = WandbLogger(
+        project="rin",
+        name=config["trainer"]["run_name"],
+        log_model=False
+    ) if config["trainer"]["log_to_wandb"] else None
     
     # Setup callbacks
     checkpoint_callback = ModelCheckpoint(
         dirpath=config["trainer"]["checkpoint_folder"],
         filename="model-{step}",
         every_n_train_steps=config["trainer"]["sample_every"],
+        save_weights_only=False,
         save_top_k=1,
         save_last=True
     )
     
     lr_monitor = LearningRateMonitor(logging_interval='step')
     
+    # Configure PyTorch Lightning Trainer
     trainer = pl.Trainer(
         max_steps=config["trainer"]["train_num_steps"],
         logger=wandb_logger,
         callbacks=[checkpoint_callback, lr_monitor],
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
-        num_nodes=1,
+        num_nodes= 2,
         devices=4,
         precision="bf16" if config["trainer"]["fp16"] else "32",
         gradient_clip_val=config["trainer"]["clip_grad_norm"],
         strategy='ddp_find_unused_parameters_true' if torch.cuda.device_count() > 1 else "auto",
+        accumulate_grad_batches=1,
     )
     
-    trainer.fit(model, datamodule=data_module, ckpt_path=args.resume_checkpoint)
+    # Start training
+    trainer.fit(model, datamodule=data_module)
 
 if __name__ == "__main__":
     main()

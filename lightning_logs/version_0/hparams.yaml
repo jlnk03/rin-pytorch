@@ -1,0 +1,67 @@
+diffusion:
+  inference_schedule: cosine
+  loss_type: eps
+  num_classes: 1000
+  pred_type: eps
+  self_cond: latent
+  train_schedule: sigmoid@-3,3,0.9
+rin:
+  cond_decoupled_read: false
+  cond_dim: 0
+  cond_on_latent_n: 1
+  cond_proj: true
+  cond_tape_writable: false
+  drop_att: 0.0
+  drop_path: 0.1
+  drop_units: 0.1
+  image_channels: 3
+  image_height: 32
+  image_width: 32
+  latent_dim: 512
+  latent_mlp_ratio: 4
+  latent_num_heads: 16
+  latent_pos_encoding: learned
+  latent_slots: 128
+  num_classes: 1000
+  num_layers: 2,2,2
+  patch_size: 2
+  rw_num_heads: 8
+  self_cond: latent
+  tape_dim: 256
+  tape_mlp_ratio: 2
+  tape_pos_encoding: learned
+  time_on_latent: true
+  time_scaling: 1000
+  xattn_enc_ln: false
+trainer:
+  amp: false
+  checkpoint_folder: results/cifar10/20250205_142145
+  clip_grad_norm: null
+  ema_decay: 0.9999
+  ema_update_every: 1
+  fp16: false
+  log_to_wandb: false
+  lr: 0.003
+  lr_scheduler_name: cosine
+  lr_warmup_steps: 10000
+  num_classes: 1000
+  num_dl_workers: 1
+  optimizer_exclude_weight_decay:
+  - bias
+  - beta
+  - gamma
+  optimizer_kwargs:
+    betas: !!python/tuple
+    - 0.9
+    - 0.999
+    eps: 1.0e-08
+    weight_decay: 0.01
+  optimizer_name: lamb
+  run_name: rin_cifar10_full
+  sample_every: 1000
+  sampling_kwargs:
+    iterations: 100
+    method: ddim
+  split_batches: true
+  train_batch_size: 64
+  train_num_steps: 150000

@@ -4,7 +4,11 @@ from datetime import datetime
 import pytorch_lightning as pl
 from lightning.pytorch.strategies import DDPStrategy
 
-from rin_pytorch.TrainerLightningCifar import (
+# from rin_pytorch.TrainerLightningCifar import (
+#     ImageNetDataModule,
+#     RinLightningModule
+# )
+from rin_pytorch.TrainerLightning import (
     ImageNetDataModule,
     RinLightningModule
 )
@@ -71,14 +75,18 @@ def main():
             optimizer_kwargs=dict(weight_decay=1e-2, betas=(0.9, 0.999), eps=1e-8),
             clip_grad_norm=None,
             sample_every=1000,
-            num_dl_workers=4,
+            num_dl_workers=2,
             ema_decay=0.9999,
             ema_update_every=1,
             sampling_kwargs=dict(iterations=100, method="ddim"),
             checkpoint_folder=f"results/cifar10/{timestamp}",
-            run_name=f"rin_cifar10_full",
+            run_name=f"rin_imagenet_full",
             log_to_wandb=True,
         ),
+        run=dict(
+            vanilla=False,
+            cifar=False
+        )
     )
     
     data_module = ImageNetDataModule(config)
@@ -97,8 +105,9 @@ def main():
         dirpath=config["trainer"]["checkpoint_folder"],
         filename="model-{step}",
         every_n_train_steps=config["trainer"]["sample_every"],
-        save_weights_only=True,
-        save_top_k=-1,
+        save_weights_only=False,
+        save_top_k=1,
+        save_last=True
     )
     
     lr_monitor = LearningRateMonitor(logging_interval='step')
@@ -109,7 +118,7 @@ def main():
         logger=wandb_logger,
         callbacks=[checkpoint_callback, lr_monitor],
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
-        num_nodes= 2,
+        num_nodes= 1,
         devices=4,
         precision="bf16" if config["trainer"]["fp16"] else "32",
         gradient_clip_val=config["trainer"]["clip_grad_norm"],

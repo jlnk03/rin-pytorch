@@ -33,6 +33,24 @@ from diffusers.optimization import get_scheduler as get_lr_scheduler
 
 load_dotenv()
 
+class ResizeMaxSide:
+    def __init__(self, max_side, interpolation=Image.BILINEAR):
+        self.max_side = max_side
+        self.interpolation = interpolation
+
+    def __call__(self, img):
+        # img is expected to be a PIL Image
+        width, height = img.size
+
+        # Compute the scaling factor such that the longest edge equals max_side
+        max_dim = max(width, height)
+        if max_dim > self.max_side:
+            scale = self.max_side / max_dim
+            new_width = int(width * scale)
+            new_height = int(height * scale)
+            img = img.resize((new_width, new_height), self.interpolation)
+        return img
+
 class FlexibleCIFAR10(Dataset):
     def __init__(self, root_dir, train=True, transform=None, target_class=None, num_samples=None, ensure_vertical=False, ensure_horizontal=False):
         self.root_dir = Path(root_dir)
@@ -100,11 +118,12 @@ def patchify(x: torch.Tensor, p: int) -> torch.Tensor:
 def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
     # Extract images and labels from the batch
     # images, labels = zip(*batch)
+    # print('batch', len(batch))
 
     images = []
     labels = []
 
-    for sample in batch:
+    for i, sample in enumerate(batch):
         images.append(sample["image"].convert("RGB"))
         labels.append(sample["label"])
 
@@ -173,7 +192,8 @@ class ImageNetDataModule(LightningDataModule):
         super().__init__()
         self.config = config
         self.transform = transforms.Compose([
-            transforms.Resize(64),
+            # transforms.Resize(64),
+            ResizeMaxSide(64),
             transforms.ToTensor(),
             transforms.RandomHorizontalFlip(),
         ])

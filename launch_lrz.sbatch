@@ -7,10 +7,9 @@
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=4
 #SBATCH --gres=gpu:4
-#SBATCH --mem=256G
-#SBATCH --time=4-00:00:00
+#SBATCH --time=0-06:00:00
 
 echo "Starting the job"
 echo "Job ID: $SLURM_JOB_ID"
-srun python train_cifar_lightning.py
+srun python train.py --config configs/default.yaml
 echo "Job finished"
