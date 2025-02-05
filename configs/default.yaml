@@ -1,16 +1,16 @@
 rin:
-  num_layers: "4,4,4,4"
+  num_layers: "2,2,2"
   latent_slots: 128
-  latent_dim: 768
+  latent_dim: 512
   latent_mlp_ratio: 4
   latent_num_heads: 16
-  tape_dim: 512
+  tape_dim: 256
   tape_mlp_ratio: 2
   rw_num_heads: 8
   image_height: 32
   image_width: 32
   image_channels: 3
-  patch_size: 8
+  patch_size: 2
   latent_pos_encoding: "learned"
   tape_pos_encoding: "learned"
   drop_path: 0.1
@@ -38,12 +38,12 @@ diffusion:
 trainer:
   num_classes: 1000
   train_num_steps: 150000
-  train_batch_size: 128
+  train_batch_size: 256
   split_batches: true
   fp16: false
   amp: false
   lr_scheduler_name: "cosine"
-  lr: 0.002
+  lr: 0.003
   lr_warmup_steps: 10000
   optimizer_name: "lamb"
   optimizer_exclude_weight_decay: ["bias", "beta", "gamma"]
