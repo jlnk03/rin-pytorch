@@ -1,16 +1,16 @@
 rin:
-  num_layers: "4,4,4,4,4,4"
-  latent_slots: 256
-  latent_dim: 768
+  num_layers: "2,2,2"
+  latent_slots: 128
+  latent_dim: 512
   latent_mlp_ratio: 4
   latent_num_heads: 16
-  tape_dim: 512
+  tape_dim: 256
   tape_mlp_ratio: 2
   rw_num_heads: 8
   image_height: 32
   image_width: 32
   image_channels: 3
-  patch_size: 4
+  patch_size: 2
   latent_pos_encoding: "learned"
   tape_pos_encoding: "learned"
   drop_path: 0.1
@@ -25,7 +25,7 @@ rin:
   cond_proj: true
   cond_decoupled_read: false
   xattn_enc_ln: false
-  num_classes: 1000
+  num_classes: 10
 
 diffusion:
   train_schedule: "sigmoid@-3,3,0.9"
@@ -35,13 +35,13 @@ diffusion:
   loss_type: "eps"
 
 trainer:
-  train_num_steps: 220000
+  train_num_steps: 150000
   train_batch_size: 256
   split_batches: true
   fp16: true
   amp: false
   lr_scheduler_name: "cosine"
-  lr: 0.002
+  lr: 0.003
   lr_warmup_steps: 10000
   optimizer_name: "lamb"
   optimizer_exclude_weight_decay: ["bias", "beta", "gamma"]
@@ -58,9 +58,9 @@ trainer:
     iterations: 100
     method: "ddim"
   checkpoint_folder: "/dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/imagenet/"
-  run_name: "imagenet_flex"
+  run_name: "cifar_flex"
   log_to_wandb: true 
 
 run:
   vanilla: false
-  cifar: false
+  cifar: true

@@ -77,7 +77,7 @@ config = dict(
         cond_proj=True,
         cond_decoupled_read=False,
         xattn_enc_ln=False,
-        num_classes=1000,
+        num_classes=10,
     ),
     diffusion=dict(
         train_schedule="sigmoid@-3,3,0.9",
@@ -87,8 +87,8 @@ config = dict(
         loss_type="eps",
     ),
     trainer=dict(
-        num_classes=1000,
-        train_num_steps=600_000,
+        num_classes=10,
+        train_num_steps=150_000,
         train_batch_size=128,
         split_batches=True,
         fp16=False,
@@ -119,11 +119,11 @@ config = dict(
 
 
 rin = Rin(**config["rin"]).cuda()
-rin.pass_dummy_data(num_classes=1000)  # populate lazy model with weights
+rin.pass_dummy_data(num_classes=10)  # populate lazy model with weights
 diffusion_model = RinDiffusionModel(rin=rin, **config["diffusion"])
 
 rin_ema = Rin(**config["rin"]).cuda()
-rin_ema.pass_dummy_data(num_classes=1000)
+rin_ema.pass_dummy_data(num_classes=10)
 ema_diffusion_model = RinDiffusionModel(rin=rin_ema, **config["diffusion"])
 
 

@@ -77,45 +77,9 @@ class ImageNetWebDataset(IterableDataset):
     def __init__(self, split='train', transform=None):
         super().__init__()
         self.transform = transform
-        
-        # # Define splits pattern
-        # splits_pattern = {
-        #     'train': '**/*-train-*.tar',
-        #     'validation': '**/*-validation-*.tar'
-        # }
-        
-        # # Setup HuggingFace filesystem
-        # fs = HfFileSystem()
-        # files = [fs.resolve_path(path) for path in 
-        #         fs.glob(f"hf://datasets/timm/imagenet-1k-wds/{splits_pattern[split]}")]
-        # urls = [hf_hub_url(file.repo_id, file.path_in_repo, repo_type="dataset") 
-        #        for file in files]
-        
-        # # Create URL string for WebDataset
-        # token = get_token()
-        # self.urls = f"pipe:curl -s -L -H 'Authorization:Bearer {token}' {'::'.join(urls)}"
-        
-        # # Setup WebDataset pipeline
-        # self.dataset = (
-        #     wds.WebDataset(self.urls)
-        #     .decode("pil")
-        #     .to_tuple("jpg;png;jpeg cls")
-        #     .map_tuple(self.transform, lambda x: int(x))
-        # )
 
-        # splits = {'train': '**/*-train-*.tar', 'validation': '**/*-validation-*.tar'}
-
-        # # Login using e.g. `huggingface-cli login` to access this dataset
-        # fs = HfFileSystem()
-        # files = [fs.resolve_path(path) for path in fs.glob("hf://datasets/timm/imagenet-1k-wds/" + splits["train"])]
-        # urls = [hf_hub_url(file.repo_id, file.path_in_repo, repo_type="dataset") for file in files]
-        # urls = f"pipe: curl -s -L -H 'Authorization:Bearer {get_token()}' {'::'.join(urls)}"
-
-        # self.dataset = wds.WebDataset(urls).decode()
-
-        print(os.getenv("IMAGE_NET_PATH"))
         try:
-            self.dataset = load_dataset("timm/imagenet-1k-wds", split="train", cache_dir=os.getenv("IMAGE_NET_PATH"), trust_remote_code=True)
+            self.dataset = load_dataset("imagenet-1k", split="train", trust_remote_code=True)
         except Exception as e:
             print(e)
         
@@ -133,9 +97,19 @@ def patchify(x: torch.Tensor, p: int) -> torch.Tensor:
     return x
 
 
-def pad_to_max_size(batch, patch_size, tape_dim):
+def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
     # Extract images and labels from the batch
-    images, labels = zip(*batch)
+    # images, labels = zip(*batch)
+
+    images = []
+    labels = []
+
+    for sample in batch:
+        images.append(sample["image"].convert("RGB"))
+        labels.append(sample["label"])
+
+    if transform:
+        images = [transform(img) for img in images]
     
     # Find the maximum height and width in the batch
     max_height = max(img.shape[1] for img in images)
@@ -199,19 +173,23 @@ class ImageNetDataModule(LightningDataModule):
         super().__init__()
         self.config = config
         self.transform = transforms.Compose([
+            transforms.Resize(64),
             transforms.ToTensor(),
             transforms.RandomHorizontalFlip(),
         ])
     
     def setup(self, stage=None):
-        self.train_dataset = FlexibleCIFAR10(
-        "datasets/cifar10_flex",
-        train=True,
-        transform=transforms.Compose([
-            transforms.ToTensor(),
-            transforms.RandomHorizontalFlip(),
-        ])
-    )
+    #     self.train_dataset = FlexibleCIFAR10(
+    #     "datasets/cifar10_flex",
+    #     train=True,
+    #     transform=transforms.Compose([
+    #         transforms.ToTensor(),
+    #         transforms.RandomHorizontalFlip(),
+    #     ])
+    # )
+        self.train_dataset = ImageNetWebDataset(
+            split='train',
+        )
     
     def train_dataloader(self):
         return DataLoader(
@@ -221,7 +199,7 @@ class ImageNetDataModule(LightningDataModule):
             pin_memory=True,
             persistent_workers=True,
             drop_last=True,
-            collate_fn=lambda batch: pad_to_max_size(batch, self.config["rin"]["patch_size"], self.config["rin"]["tape_dim"])
+            collate_fn=lambda batch: pad_to_max_size(batch, self.config["rin"]["patch_size"], self.config["rin"]["tape_dim"], self.transform)
         )
 
 
@@ -290,10 +268,21 @@ class RinLightningModule(LightningModule):
         if self.global_step % self.sample_every == 0:
             self.ema_diffusion_model.eval()
             n = 8
-            samples = self.ema_diffusion_model.sample(num_samples=n * n, tape_dim=self.tape_dim, **self.sampling_kwargs)
+            samples = self.ema_diffusion_model.sample(num_samples=n * n, image_height=256, image_width=256, tape_dim=self.tape_dim, **self.sampling_kwargs)
             grid = torchvision.utils.make_grid(samples, nrow=n, normalize=True, value_range=(0, 1), padding=0)
             self.logger.experiment.log({"samples": [wandb.Image(grid)]}, step=self.global_step)
+
+            samples_horizontal = self.ema_diffusion_model.sample(num_samples=n * n, image_height=128, image_width=256, tape_dim=self.tape_dim, **self.sampling_kwargs)
+            grid_horizontal = torchvision.utils.make_grid(samples_horizontal, nrow=n, normalize=True, value_range=(0, 1), padding=0)
+            self.logger.experiment.log({"samples_horizontal": [wandb.Image(grid_horizontal)]}, step=self.global_step)
+
+            samples_vertical = self.ema_diffusion_model.sample(num_samples=n * n, image_height=256, image_width=128, tape_dim=self.tape_dim, **self.sampling_kwargs)
+            grid_vertical = torchvision.utils.make_grid(samples_vertical, nrow=n, normalize=True, value_range=(0, 1), padding=0)
+            self.logger.experiment.log({"samples_vertical": [wandb.Image(grid_vertical)]}, step=self.global_step)
+
             del samples
+            del samples_horizontal
+            del samples_vertical
             self.ema_diffusion_model.train()
 
         return loss
@@ -326,3 +315,11 @@ class RinLightningModule(LightningModule):
                 "frequency": 1,
             }
         }
+    
+    def on_save_checkpoint(self, checkpoint):
+        checkpoint["ema_model"] = self.ema_diffusion_model.state_dict()
+        return checkpoint
+
+    def on_load_checkpoint(self, checkpoint):
+        if "ema_model" in checkpoint:
+            self.ema_diffusion_model.load_state_dict(checkpoint["ema_model"])

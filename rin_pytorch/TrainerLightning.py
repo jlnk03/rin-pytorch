@@ -12,6 +12,8 @@ import webdataset as wds
 from huggingface_hub import HfFileSystem, get_token, hf_hub_url
 from datasets import load_dataset
 
+from .utils.FlexibleCifar import FlexibleCIFAR10
+
 from PIL import Image
 
 from rin_pytorch import Rin, RinDiffusionModel
@@ -156,17 +158,29 @@ class ImageNetDataModule(LightningDataModule):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.transform = transforms.Compose([
-            transforms.Resize((128, 128)) if self.config["run"]["vanilla"] else ResizeMaxSide(128),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-        ])
+        if self.config["run"]["cifar"]:
+            self.transform = transforms.Compose([
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+            ])
+        else:
+            self.transform = transforms.Compose([
+                transforms.Resize((128, 128)) if self.config["run"]["vanilla"] else ResizeMaxSide(128),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+            ])
     
     def setup(self, stage=None):
-        self.train_dataset = ImageNetWebDataset(
-            split='train',
-            transform=self.transform
-        )
+        if self.config["run"]["cifar"]: 
+            self.train_dataset = FlexibleCIFAR10(
+                "datasets/cifar10_flex",
+                train=True,
+            )
+        else:
+            self.train_dataset = ImageNetWebDataset(
+                split='train',
+                # transform=self.transform
+            )
     
     def train_dataloader(self):
         return DataLoader(

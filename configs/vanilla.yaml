@@ -63,3 +63,4 @@ trainer:
 
 run:
   vanilla: true
+  cifar: false
