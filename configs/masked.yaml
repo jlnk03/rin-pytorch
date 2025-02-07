@@ -35,13 +35,13 @@ diffusion:
   loss_type: "eps"
 
 trainer:
-  train_num_steps: 220000
+  train_num_steps: 150000
   train_batch_size: 256
   split_batches: true
-  fp16: true
+  fp16: false
   amp: false
   lr_scheduler_name: "cosine"
-  lr: 0.002
+  lr: 0.003
   lr_warmup_steps: 10000
   optimizer_name: "lamb"
   optimizer_exclude_weight_decay: ["bias", "beta", "gamma"]

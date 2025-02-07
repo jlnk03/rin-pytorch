@@ -184,3 +184,5 @@ datasets/
 wandb/
 
 output/
+
+*.csv
