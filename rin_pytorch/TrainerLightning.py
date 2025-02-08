@@ -318,3 +318,11 @@ class RinLightningModule(LightningModule):
                 "frequency": 1,
             }
         }
+
+    def on_save_checkpoint(self, checkpoint):
+        checkpoint["ema_model"] = self.ema_diffusion_model.state_dict()
+        return checkpoint
+
+    def on_load_checkpoint(self, checkpoint):
+        if "ema_model" in checkpoint:
+            self.ema_diffusion_model.load_state_dict(checkpoint["ema_model"])

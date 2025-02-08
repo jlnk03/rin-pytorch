@@ -68,6 +68,7 @@ def main():
         precision="bf16" if config["trainer"]["fp16"] else "32",
         gradient_clip_val=config["trainer"]["clip_grad_norm"],
         strategy='ddp_find_unused_parameters_true' if torch.cuda.device_count() > 1 else "auto",
+        log_every_n_steps=config["trainer"]["log_every_n_steps"]
     )
     
     # Pass the resume checkpoint path to trainer.fit() to resume from a given checkpoint
