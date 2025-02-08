@@ -50,7 +50,7 @@ def main():
             cond_proj=True,
             cond_decoupled_read=False,
             xattn_enc_ln=False,
-            num_classes=1000,
+            num_classes=10,
         ),
         diffusion=dict(
             train_schedule="sigmoid@-3,3,0.9",
@@ -58,10 +58,10 @@ def main():
             pred_type="eps",
             self_cond="latent",
             loss_type="eps",
-            num_classes=1000,
+            num_classes=10,
         ),
         trainer=dict(
-            num_classes=1000,
+            num_classes=10,
             train_num_steps=150_000,
             train_batch_size=64,
             split_batches=True,
