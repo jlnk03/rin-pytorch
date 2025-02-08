@@ -57,7 +57,7 @@ trainer:
   sampling_kwargs:
     iterations: 100
     method: "ddim"
-  checkpoint_folder: "/dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/imagenet/"
+  checkpoint_folder: "/dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/imagenet/masked"
   run_name: "imagenet_masked"
   log_to_wandb: true 
   log_every_n_steps: 10
