@@ -42,7 +42,9 @@ def main():
     wandb_logger = WandbLogger(
         project="rin",
         name=config["trainer"]["run_name"],
-        log_model=False
+        log_model=False,
+        id=args.wandb_resume,
+        resume=True if args.wandb_resume else False
     ) if config["trainer"]["log_to_wandb"] else None
     
     # Setup callbacks
@@ -66,14 +68,14 @@ def main():
         num_nodes= 1,
         devices=4,
         precision="bf16" if config["trainer"]["fp16"] else "32",
-        gradient_clip_val=config["trainer"]["clip_grad_norm"],
+        # gradient_clip_val=config["trainer"]["clip_grad_norm"],
         strategy='ddp_find_unused_parameters_true' if torch.cuda.device_count() > 1 else "auto",
         accumulate_grad_batches=1,
         log_every_n_steps=config["trainer"]["log_every_n_steps"]
     )
     
     # Start training
-    trainer.fit(model, datamodule=data_module)
+    trainer.fit(model, datamodule=data_module, ckpt_path=args.resume_checkpoint)
 
 if __name__ == "__main__":
     main()

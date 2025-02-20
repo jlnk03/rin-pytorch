@@ -31,6 +31,9 @@ from dotenv import load_dotenv
 
 from diffusers.optimization import get_scheduler as get_lr_scheduler
 
+from datetime import datetime, timedelta
+from wandb import AlertLevel
+
 load_dotenv()
 
 class ResizeMaxSide:
@@ -218,7 +221,43 @@ class RinLightningModule(LightningModule):
         self.tape_dim = rin_config["tape_dim"]
         self.num_classes = rin_config["num_classes"]
         self.patch_size = rin_config["patch_size"]
-    
+        
+        # Add tracking for lowest loss
+        self.lowest_loss = float('inf')
+        self.run_started = False
+
+    def on_train_start(self):
+        try:
+            wandb.alert(
+                title='Training Started',
+                text=f'Training run has begun with config: {self.hparams}',
+                level=AlertLevel.INFO
+            )
+        except Exception as e:
+            print(e)
+        self.run_started = True
+
+    def on_train_end(self):
+        try:
+            wandb.alert(
+                title='Training Completed',
+                text=f'Training run has completed successfully. Final loss: {self.lowest_loss}',
+                level=AlertLevel.INFO
+            )
+        except Exception as e:
+            print(e)
+
+    def on_train_epoch_end(self):
+        if self.trainer.should_stop:
+            try:
+                wandb.alert(
+                    title='Training Stopped Early',
+                    text=f'Training stopped before completion. Final loss: {self.lowest_loss}',
+                    level=AlertLevel.WARN
+                )
+            except Exception as e:
+                print(e)
+
     def forward(self, batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw):
         return self.diffusion_model(batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw)
     
@@ -231,7 +270,25 @@ class RinLightningModule(LightningModule):
         opt.zero_grad()
         loss = self(batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw)
         self.manual_backward(loss)
+        
+        if self.hparams["trainer"].get("clip_grad_norm"):
+            torch.nn.utils.clip_grad_norm_(self.parameters(), self.hparams["trainer"]["clip_grad_norm"])
+        
         opt.step()
+
+        # Track lowest loss and alert if current loss is too high
+        try:
+            if loss.item() < self.lowest_loss:
+                self.lowest_loss = loss.item()
+            elif loss.item() > 2 * self.lowest_loss:  # Alert if loss is more than double the lowest loss
+                wandb.alert(
+                    title='High Loss Detected',
+                    text=f'Current loss ({loss.item():.4f}) is more than 100% higher than lowest loss ({self.lowest_loss:.4f})',
+                        level=AlertLevel.WARN,
+                        wait_duration=timedelta(minutes=5)
+                )
+        except Exception as e:
+            print(e)
 
         # Update learning rate
         sch = self.lr_schedulers()
@@ -314,3 +371,10 @@ class RinLightningModule(LightningModule):
     def on_load_checkpoint(self, checkpoint):
         if "ema_model" in checkpoint:
             self.ema_diffusion_model.load_state_dict(checkpoint["ema_model"])
+
+    # def on_exception(self, trainer, pl_module, exception):
+    #     wandb.alert(
+    #         title='Training Crashed',
+    #         text=f'Training run crashed with exception: {str(exception)}',
+    #         level=AlertLevel.ERROR
+    #     )

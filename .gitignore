@@ -186,3 +186,5 @@ wandb/
 output/
 
 *.csv
+
+/lightning_logs/
