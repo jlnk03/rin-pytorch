@@ -65,7 +65,7 @@ def main():
         logger=wandb_logger,
         callbacks=[checkpoint_callback, lr_monitor],
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
-        num_nodes= 2,
+        num_nodes= 4,
         devices=4,
         precision="bf16" if config["trainer"]["fp16"] else "32",
         # gradient_clip_val=config["trainer"]["clip_grad_norm"],

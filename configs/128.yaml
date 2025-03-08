@@ -1,0 +1,69 @@
+rin:
+  num_layers: "4,4,4,4,4,4"
+  latent_slots: 128
+  latent_dim: 768
+  latent_mlp_ratio: 4
+  latent_num_heads: 16
+  tape_dim: 512
+  tape_mlp_ratio: 4
+  rw_num_heads: 16
+  image_height: 128
+  image_width: 128
+  image_channels: 3
+  patch_size: 4
+  latent_pos_encoding: "learned"
+  tape_pos_encoding: "learned"
+  drop_path: 0.1
+  drop_units: 0.1
+  drop_att: 0.0
+  time_scaling: 1000
+  self_cond: "latent"
+  time_on_latent: true
+  cond_on_latent_n: 1
+  cond_tape_writable: false
+  cond_dim: 0
+  cond_proj: true
+  cond_decoupled_read: false
+  xattn_enc_ln: false
+  num_classes: 1000
+
+diffusion:
+  # train_schedule: "sigmoid@-3,3,0.9"
+  train_schedule: "simple_linear"
+  inference_schedule: "cosine"
+  pred_type: "eps"
+  self_cond: "latent"
+  loss_type: "eps"
+  num_classes: 1000
+
+trainer:
+  num_classes: 1000
+  train_num_steps: 220000
+  train_batch_size: 128
+  split_batches: true
+  fp16: false
+  lr_scheduler_name: "cosine"
+  lr: 0.002
+  lr_warmup_steps: 10000
+  optimizer_name: "lamb"
+  optimizer_exclude_weight_decay: ["bias", "beta", "gamma"]
+  optimizer_kwargs:
+    weight_decay: 0.01
+    betas: [0.9, 0.999]
+    eps: !!float 1e-8
+  clip_grad_norm: null
+  sample_every: 1000
+  num_dl_workers: 4
+  ema_decay: 0.9999
+  ema_update_every: 1
+  sampling_kwargs:
+    iterations: 100
+    method: "ddim"
+  checkpoint_folder: "/dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/imagenet/"
+  run_name: "imagenet_flex_large_ps_4"
+  log_to_wandb: true
+  log_every_n_steps: 10
+
+run:
+  vanilla: false
+  cifar: false

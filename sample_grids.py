@@ -8,6 +8,7 @@ from tqdm import tqdm
 import math
 from torchvision.utils import save_image
 import os
+from datetime import datetime
 
 from rin_pytorch import Rin, RinDiffusionModel
 
@@ -16,7 +17,7 @@ def load_config(config_file):
         return yaml.safe_load(f)
 
 def sample_grids(config_path, checkpoint_path, output_dir, 
-                grid_size=8, iterations=100, method="ddim", class_label=None, num_grids=1):
+                grid_size=8, iterations=100, method="ddim", class_labels=None, num_grids=1):
     """
     Generate three grids of samples with different aspect ratios:
     1. Square: 128x128
@@ -27,7 +28,12 @@ def sample_grids(config_path, checkpoint_path, output_dir,
     -----------
     num_grids : int
         Number of grids to generate for each aspect ratio
+    class_labels : list or None
+        List of class labels to sample from. If None, no class conditioning is used.
     """
+    # Get current date in YYYYMMDD format
+    current_date = datetime.now().strftime("%Y%m%d")
+    
     # Load configuration
     config = load_config(config_path)
     
@@ -117,58 +123,134 @@ def sample_grids(config_path, checkpoint_path, output_dir,
     # Use EMA model for sampling
     ema_diffusion_model.eval()
     
-    # Define sampling parameters
+    # Define sampling parameters (without class_override for now)
     sampling_kwargs = {
         "iterations": iterations,
         "method": method,
-        "class_override": class_label
     }
     
-    print(f"Generating {num_grids} grids with {grid_size}x{grid_size} samples for each aspect ratio...")
+    # If no class labels are provided, use None (unconditional generation)
+    if class_labels is None:
+        class_labels = [None]
+    
+    # Create a progress bar for all combinations of grids and classes
+    total_iterations = num_grids * len(class_labels)
+    progress_bar = tqdm(total=total_iterations, desc="Generating grids")
     
     with torch.no_grad():
-        # Generate multiple grids for each aspect ratio
-        for grid_idx in tqdm(range(num_grids), desc="Generating grids"):
-            # Generate square samples (128x128)
-            samples = ema_diffusion_model.sample(
-                num_samples=grid_size * grid_size, 
-                image_height=128, 
-                image_width=128, 
-                tape_dim=rin_config["tape_dim"], 
-                **sampling_kwargs
-            )
-            grid = torchvision.utils.make_grid(samples, nrow=grid_size, normalize=True, value_range=(0, 1), padding=2)
-            save_image(grid, square_dir / f"grid_square_{grid_idx:04d}.png")
+        # For each class label
+        for class_idx, class_label in enumerate(class_labels):
+            # Create class-specific subdirectories
+            class_name = f"class_{class_label}" if class_label is not None else "unconditional"
             
-            # Generate horizontal samples (72x128)
-            samples_horizontal = ema_diffusion_model.sample(
-                num_samples=grid_size * grid_size, 
-                image_height=72, 
-                image_width=128, 
-                tape_dim=rin_config["tape_dim"], 
-                **sampling_kwargs
-            )
-            grid_horizontal = torchvision.utils.make_grid(samples_horizontal, nrow=grid_size, normalize=True, value_range=(0, 1), padding=2)
-            save_image(grid_horizontal, horizontal_dir / f"grid_horizontal_{grid_idx:04d}.png")
+            class_square_dir = square_dir / class_name
+            class_horizontal_dir = horizontal_dir / class_name
+            class_vertical_dir = vertical_dir / class_name
             
-            # Generate vertical samples (128x72)
-            samples_vertical = ema_diffusion_model.sample(
-                num_samples=grid_size * grid_size, 
-                image_height=128, 
-                image_width=72, 
-                tape_dim=rin_config["tape_dim"], 
-                **sampling_kwargs
-            )
-            grid_vertical = torchvision.utils.make_grid(samples_vertical, nrow=grid_size, normalize=True, value_range=(0, 1), padding=2)
-            save_image(grid_vertical, vertical_dir / f"grid_vertical_{grid_idx:04d}.png")
+            for dir_path in [class_square_dir, class_horizontal_dir, class_vertical_dir]:
+                dir_path.mkdir(exist_ok=True, parents=True)
             
-            # Free up memory
-            del samples
-            del samples_horizontal
-            del samples_vertical
-            torch.cuda.empty_cache()
+            # Update sampling kwargs with current class
+            current_sampling_kwargs = sampling_kwargs.copy()
+            current_sampling_kwargs["class_override"] = class_label
+            
+            # Generate multiple grids for each aspect ratio
+            for grid_idx in range(num_grids):
+                # Generate square samples (128x128)
+                samples = ema_diffusion_model.sample(
+                    num_samples=grid_size * grid_size, 
+                    image_height=128, 
+                    image_width=128, 
+                    tape_dim=rin_config["tape_dim"], 
+                    **current_sampling_kwargs
+                )
+                
+                # Create filename with class info and date
+                filename = f"grid_square_{grid_idx:04d}_{current_date}.png"
+                
+                grid = torchvision.utils.make_grid(samples, nrow=grid_size, normalize=True, value_range=(0, 1), padding=2)
+                save_image(grid, class_square_dir / filename)
+                
+                # Save individual images if needed
+                if grid_size <= 16:  # Only save individual images for smaller grids to avoid too many files
+                    individual_dir = class_square_dir / f"individual_{grid_idx:04d}"
+                    individual_dir.mkdir(exist_ok=True, parents=True)
+                    
+                    for img_idx, img in enumerate(samples):
+                        img_filename = f"img_{img_idx:04d}_{current_date}.png"
+                        save_image(img, individual_dir / img_filename, normalize=True, value_range=(0, 1))
+                
+                # Generate horizontal samples (72x128)
+                samples_horizontal = ema_diffusion_model.sample(
+                    num_samples=grid_size * grid_size, 
+                    image_height=72, 
+                    image_width=128, 
+                    tape_dim=rin_config["tape_dim"], 
+                    **current_sampling_kwargs
+                )
+                
+                # Create filename with date
+                filename = f"grid_horizontal_{grid_idx:04d}_{current_date}.png"
+                
+                grid_horizontal = torchvision.utils.make_grid(samples_horizontal, nrow=grid_size, normalize=True, value_range=(0, 1), padding=2)
+                save_image(grid_horizontal, class_horizontal_dir / filename)
+                
+                # Save individual images if needed
+                if grid_size <= 16:  # Only save individual images for smaller grids
+                    individual_dir = class_horizontal_dir / f"individual_{grid_idx:04d}"
+                    individual_dir.mkdir(exist_ok=True, parents=True)
+                    
+                    for img_idx, img in enumerate(samples_horizontal):
+                        img_filename = f"img_{img_idx:04d}_{current_date}.png"
+                        save_image(img, individual_dir / img_filename, normalize=True, value_range=(0, 1))
+                
+                # Generate vertical samples (128x72)
+                samples_vertical = ema_diffusion_model.sample(
+                    num_samples=grid_size * grid_size, 
+                    image_height=128, 
+                    image_width=72, 
+                    tape_dim=rin_config["tape_dim"], 
+                    **current_sampling_kwargs
+                )
+                
+                # Create filename with date
+                filename = f"grid_vertical_{grid_idx:04d}_{current_date}.png"
+                
+                grid_vertical = torchvision.utils.make_grid(samples_vertical, nrow=grid_size, normalize=True, value_range=(0, 1), padding=2)
+                save_image(grid_vertical, class_vertical_dir / filename)
+                
+                # Save individual images if needed
+                if grid_size <= 16:  # Only save individual images for smaller grids
+                    individual_dir = class_vertical_dir / f"individual_{grid_idx:04d}"
+                    individual_dir.mkdir(exist_ok=True, parents=True)
+                    
+                    for img_idx, img in enumerate(samples_vertical):
+                        img_filename = f"img_{img_idx:04d}_{current_date}.png"
+                        save_image(img, individual_dir / img_filename, normalize=True, value_range=(0, 1))
+                
+                # Free up memory
+                del samples
+                del samples_horizontal
+                del samples_vertical
+                torch.cuda.empty_cache()
+                
+                # Update progress bar
+                progress_bar.update(1)
     
-    print(f"Done! Generated {num_grids} grids for each aspect ratio saved to {output_dir}")
+    progress_bar.close()
+    
+    # Print summary
+    if len(class_labels) > 1:
+        class_str = f"{len(class_labels)} classes"
+    elif class_labels[0] is not None:
+        class_str = f"class {class_labels[0]}"
+    else:
+        class_str = "unconditional generation"
+    
+    print(f"Done! Generated {num_grids} grids for each aspect ratio with {class_str}")
+    print(f"Results saved to {output_dir}")
+    print(f"Date stamp: {current_date}")
+    
     return output_dir
 
 def main():
@@ -179,9 +261,17 @@ def main():
     parser.add_argument("--grid_size", type=int, default=8, help="Size of the grid (grid_size x grid_size)")
     parser.add_argument("--iterations", type=int, default=100, help="Number of sampling iterations")
     parser.add_argument("--method", type=str, default="ddim", help="Sampling method (ddim or ddpm)")
-    parser.add_argument("--class_label", type=int, default=None, help="Optional: Generate images for specific class")
+    parser.add_argument("--class_labels", type=str, default=None, 
+                        help="Optional: Comma-separated list of class labels to sample from (e.g., '0,1,2')")
     parser.add_argument("--num_grids", type=int, default=1, help="Number of grids to generate for each aspect ratio")
+    parser.add_argument("--save_individual", action="store_true", help="Save individual images in addition to grids")
     args = parser.parse_args()
+    
+    # Parse class labels if provided
+    if args.class_labels is not None:
+        class_labels = [int(c.strip()) for c in args.class_labels.split(',')]
+    else:
+        class_labels = None
     
     sample_grids(
         config_path=args.config,
@@ -190,7 +280,7 @@ def main():
         grid_size=args.grid_size,
         iterations=args.iterations,
         method=args.method,
-        class_label=args.class_label,
+        class_labels=class_labels,
         num_grids=args.num_grids,
     )
 

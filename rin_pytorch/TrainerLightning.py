@@ -277,18 +277,18 @@ class RinLightningModule(LightningModule):
         opt.step()
 
         # Track lowest loss and alert if current loss is too high
-        try:
-            if loss.item() < self.lowest_loss:
-                self.lowest_loss = loss.item()
-            elif loss.item() > 2 * self.lowest_loss:  # Alert if loss is more than double the lowest loss
-                wandb.alert(
-                    title='High Loss Detected',
-                    text=f'Current loss ({loss.item():.4f}) is more than 100% higher than lowest loss ({self.lowest_loss:.4f})',
-                        level=AlertLevel.WARN,
-                        wait_duration=timedelta(minutes=5)
-                )
-        except Exception as e:
-            print(e)
+        # try:
+        #     if loss.item() < self.lowest_loss:
+        #         self.lowest_loss = loss.item()
+        #     elif loss.item() > 2 * self.lowest_loss:  # Alert if loss is more than double the lowest loss
+        #         wandb.alert(
+        #             title='High Loss Detected',
+        #             text=f'Current loss ({loss.item():.4f}) is more than 100% higher than lowest loss ({self.lowest_loss:.4f})',
+        #                 level=AlertLevel.WARN,
+        #                 wait_duration=timedelta(minutes=5)
+        #         )
+        # except Exception as e:
+        #     print(e)
 
         # Update learning rate
         sch = self.lr_schedulers()
