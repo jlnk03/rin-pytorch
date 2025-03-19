@@ -248,6 +248,8 @@ class RinDiffusionModel(torch.nn.Module):
 
             if torch.any(mask):
                 # print(f'mask: {mask}')
+                # print(f'mask shape: {mask.shape}')
+                # print(f'tape_prev shape: {tape_prev.shape}')
                 with torch.no_grad():
                     _, latent_prev_out, tape_prev_out = self.denoise(
                         x=images_noised[mask],
@@ -258,6 +260,9 @@ class RinDiffusionModel(torch.nn.Module):
                         nmh=nmh,
                         nmw=nmw,
                     )
+
+                # print(f'latent_prev_out: {latent_prev_out.shape}')
+                # print(f'tape_prev_out: {tape_prev_out.shape}')
 
                 latent_prev[mask] = latent_prev_out.detach()
                 tape_prev[mask] = tape_prev_out.detach()

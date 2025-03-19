@@ -167,17 +167,12 @@ def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
     image_masks = torch.stack(image_masks).bool()
     pos_embs = torch.stack(pos_embs)
 
-    _, token_mask = create_random_token_mask(padded_images, mask_ratio=0)
+    _, token_mask = create_random_token_mask(padded_images, mask_ratio=0.3)
     
     visible_padded_images = []
     visible_patch_masks = []
     visible_pos_embs = []
     for i, (padded_image, patch_mask, pos_emb) in enumerate(zip(padded_images, patch_masks, pos_embs)):
-        print(padded_image.shape, patch_mask.shape, pos_emb.shape)
-        print(token_mask.shape)
-        print(token_mask[i].shape)
-        print(~token_mask[i].sum())
-        print(token_mask[i].sum())
         # print(token_mask[i])
         visible_idx = ~token_mask[i]
         visible_padded_images.append(padded_image[visible_idx])
@@ -187,6 +182,8 @@ def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
     visible_padded_images = torch.stack(visible_padded_images)
     visible_patch_masks = torch.stack(visible_patch_masks)
     visible_pos_embs = torch.stack(visible_pos_embs)
+
+    # print(f'visible_padded_images.shape: {visible_padded_images.shape}')
     
     return visible_padded_images, visible_patch_masks, image_masks, labels, visible_pos_embs, nmh, nmw
 

@@ -52,7 +52,7 @@ class Rin(torch.nn.Module):
         xattn_enc_ln=False,
         num_classes=None,
         pre_tokenized: bool = False,
-        mask_ratio: float = 0.5,
+        mask_ratio: float = 0.3,
     ):
         super().__init__()
 
@@ -61,7 +61,7 @@ class Rin(torch.nn.Module):
         self._image_channels = image_channels
         self._n_rows = image_height // patch_size
         self._n_cols = image_width // patch_size
-        self._num_tokens = self._n_rows * self._n_cols
+        self._num_tokens = int(self._n_rows * self._n_cols * (1 - mask_ratio))
         self._patch_size = patch_size
         self._output_dim = patch_size**2 * image_channels
         self.mask_ratio = mask_ratio
