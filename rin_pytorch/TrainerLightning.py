@@ -101,7 +101,7 @@ def patchify(x: torch.Tensor, p: int) -> torch.Tensor:
     return x
 
 
-def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
+def pad_to_max_size(batch, patch_size, tape_dim, mask_ratio, transform=None):
     images = []
     labels = []
     for example in batch:
@@ -167,7 +167,7 @@ def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
     image_masks = torch.stack(image_masks).bool()
     pos_embs = torch.stack(pos_embs)
 
-    _, token_mask = create_random_token_mask(padded_images, mask_ratio=0.3)
+    _, token_mask = create_random_token_mask(padded_images, mask_ratio=mask_ratio)
     
     visible_padded_images = []
     visible_patch_masks = []
@@ -203,6 +203,12 @@ class ImageNetDataModule(LightningDataModule):
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
             ])
+        
+        # Add masking schedule parameters
+        self.initial_mask_ratio = 0.5
+        self.final_mask_ratio = 0.0
+        self.total_steps = config["trainer"]["train_num_steps"]
+        self.current_step = 0  # Add this to track steps
     
     def setup(self, stage=None):
         if self.config["run"]["cifar"]: 
@@ -216,6 +222,11 @@ class ImageNetDataModule(LightningDataModule):
                 # transform=self.transform
             )
     
+    def get_current_mask_ratio(self):
+        # Linear schedule from initial_mask_ratio to final_mask_ratio
+        progress = min(self.current_step / self.total_steps, 1.0)
+        return self.initial_mask_ratio + (self.final_mask_ratio - self.initial_mask_ratio) * progress
+    
     def train_dataloader(self):
         return DataLoader(
             self.train_dataset,
@@ -224,7 +235,13 @@ class ImageNetDataModule(LightningDataModule):
             pin_memory=True,
             persistent_workers=True,
             drop_last=True,
-            collate_fn=lambda batch: pad_to_max_size(batch, self.config["rin"]["patch_size"], self.config["rin"]["tape_dim"], self.transform)
+            collate_fn=lambda batch: pad_to_max_size(
+                batch,
+                self.config["rin"]["patch_size"],
+                self.config["rin"]["tape_dim"],
+                mask_ratio=self.get_current_mask_ratio(),
+                transform=self.transform
+            )
         )
 
 
@@ -252,12 +269,25 @@ class RinLightningModule(LightningModule):
         self.tape_dim = rin_config["tape_dim"]
         self.num_classes = rin_config["num_classes"]
         self.patch_size = rin_config["patch_size"]
+        
+        # Add masking schedule parameters
+        self.initial_mask_ratio = 0.5
+        self.final_mask_ratio = 0.0
+        self.total_steps = config["trainer"]["train_num_steps"]
+    
+    def get_current_mask_ratio(self):
+        # Linear schedule from initial_mask_ratio to final_mask_ratio
+        progress = min(self.global_step / self.total_steps, 1.0)
+        return self.initial_mask_ratio + (self.final_mask_ratio - self.initial_mask_ratio) * progress
     
     def forward(self, batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw):
         return self.diffusion_model(batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw)
     
     def training_step(self, batch, batch_idx):
         opt = self.optimizers()
+        
+        # Update the step counter in the DataModule
+        self.trainer.datamodule.current_step = self.global_step
         
         batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw = batch
         batch_class = torch.nn.functional.one_hot(batch_class, num_classes=self.num_classes).float()
@@ -273,6 +303,7 @@ class RinLightningModule(LightningModule):
         logs = {
             "loss": loss.item(),
             "lr": sch.get_last_lr()[0],
+            "mask_ratio": self.trainer.datamodule.get_current_mask_ratio(),
         }
 
         self.log_dict(logs, on_step=True, prog_bar=True)
