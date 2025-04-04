@@ -433,6 +433,7 @@ class Rin(torch.nn.Module):
         nmw: torch.Tensor | None = None,
         latent_prev: torch.Tensor | None = None,
         tape_prev: torch.Tensor | None = None,
+        mask_ratio: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # assert x.ndim == 4
         bs = x.shape[0]
@@ -444,7 +445,9 @@ class Rin(torch.nn.Module):
             latent_prev = torch.zeros(bs, *self.latent_shape, device=x.device)
 
         if tape_prev is None:
-            tape_prev = torch.zeros(bs, *self.tape_shape, device=x.device)
+            # tape_prev = torch.zeros(bs, *self.tape_shape, device=x.device)
+            tape_shape = [int(nmh * nmw * (1 - mask_ratio)), self._tape_dim]
+            tape_prev = torch.zeros(bs, *tape_shape, device=x.device)
 
         if self._cond_on_latent and cond is None:
             raise ValueError("cond is None but cond_on_latent is True")

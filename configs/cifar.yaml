@@ -59,8 +59,8 @@ trainer:
   sampling_kwargs:
     iterations: 100
     method: "ddim"
-  checkpoint_folder: "/dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/cifar/masked/"
-  run_name: "cifar_flex_masked_70"
+  checkpoint_folder: "/dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/cifar/masked_linear/"
+  run_name: "cifar_flex_masked_linear"
   log_to_wandb: true
   log_every_n_steps: 10
 

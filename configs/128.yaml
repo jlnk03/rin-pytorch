@@ -60,7 +60,7 @@ trainer:
     iterations: 100
     method: "ddim"
   checkpoint_folder: "/dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/imagenet/"
-  run_name: "imagenet_masked_large_ps_4_30"
+  run_name: "imagenet_lin_masked_large_ps_4_50_0"
   log_to_wandb: true
   log_every_n_steps: 10
 

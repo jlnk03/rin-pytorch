@@ -65,7 +65,7 @@ def main():
         callbacks=[checkpoint_callback, lr_monitor],
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         num_nodes= 1,
-        devices=1,
+        devices=4,
         precision="bf16" if config["trainer"]["fp16"] else "32",
         gradient_clip_val=config["trainer"]["clip_grad_norm"],
         strategy='ddp_find_unused_parameters_true' if torch.cuda.device_count() > 1 else "auto",

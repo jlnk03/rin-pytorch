@@ -280,8 +280,9 @@ class RinLightningModule(LightningModule):
         progress = min(self.global_step / self.total_steps, 1.0)
         return self.initial_mask_ratio + (self.final_mask_ratio - self.initial_mask_ratio) * progress
     
-    def forward(self, batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw):
-        return self.diffusion_model(batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw)
+    def forward(self, batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw, mask_ratio):
+        # print(f'mask_ratio_forward: {mask_ratio}')
+        return self.diffusion_model(batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw, mask_ratio)
     
     def training_step(self, batch, batch_idx):
         opt = self.optimizers()
@@ -293,7 +294,9 @@ class RinLightningModule(LightningModule):
         batch_class = torch.nn.functional.one_hot(batch_class, num_classes=self.num_classes).float()
 
         opt.zero_grad()
-        loss = self(batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw)
+        mask_ratio = self.trainer.datamodule.get_current_mask_ratio()
+        # print(f'mask_ratio_trainer: {mask_ratio}')
+        loss = self(batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw, mask_ratio)
         self.manual_backward(loss)
         opt.step()
 
@@ -319,15 +322,15 @@ class RinLightningModule(LightningModule):
         if self.global_step % self.sample_every == 0:
             self.ema_diffusion_model.eval()
             n = 8
-            samples = self.ema_diffusion_model.sample(num_samples=n * n, image_height=256, image_width=256, tape_dim=self.tape_dim, **self.sampling_kwargs)
+            samples = self.ema_diffusion_model.sample(num_samples=n * n, image_height=32, image_width=32, tape_dim=self.tape_dim, **self.sampling_kwargs)
             grid = torchvision.utils.make_grid(samples, nrow=n, normalize=True, value_range=(0, 1), padding=0)
             self.logger.experiment.log({"samples": [wandb.Image(grid)]}, step=self.global_step)
 
-            samples_horizontal = self.ema_diffusion_model.sample(num_samples=n * n, image_height=128, image_width=256, tape_dim=self.tape_dim, **self.sampling_kwargs)
+            samples_horizontal = self.ema_diffusion_model.sample(num_samples=n * n, image_height=24, image_width=32, tape_dim=self.tape_dim, **self.sampling_kwargs)
             grid_horizontal = torchvision.utils.make_grid(samples_horizontal, nrow=n, normalize=True, value_range=(0, 1), padding=0)
             self.logger.experiment.log({"samples_horizontal": [wandb.Image(grid_horizontal)]}, step=self.global_step)
 
-            samples_vertical = self.ema_diffusion_model.sample(num_samples=n * n, image_height=256, image_width=128, tape_dim=self.tape_dim, **self.sampling_kwargs)
+            samples_vertical = self.ema_diffusion_model.sample(num_samples=n * n, image_height=32, image_width=24, tape_dim=self.tape_dim, **self.sampling_kwargs)
             grid_vertical = torchvision.utils.make_grid(samples_vertical, nrow=n, normalize=True, value_range=(0, 1), padding=0)
             self.logger.experiment.log({"samples_vertical": [wandb.Image(grid_vertical)]}, step=self.global_step)
 
