@@ -458,7 +458,12 @@ class Rin(torch.nn.Module):
         latent = self.initialize_latent(bs, time_emb, cond, latent_prev)
         latent, tape = self.compute(latent, tape, tape_r, masks)
         x = self.readout_tape(tape, nmh, nmw)
-        return x, latent, tape[:, : self._tape_slots]
+        tape_slots = int(nmh * nmw * (1 - mask_ratio))
+        # return x, latent, tape[:, : self._tape_slots]
+        # TODO: Check if the tape shape is actually correct ie if the second dim should not be tape_dim and first dim : tape_slots
+        # TODO: Check tensorflow implementation to verify tape shape
+        # TODO: If this works rerun previous runs to see if this affected the previous results!
+        return x, latent, tape[: tape_slots, : self._tape_dim]
 
     def load_weights_numpy(self, np_file):
         # load weights from numpy file relying on the order of parameters
