@@ -12,6 +12,8 @@ import webdataset as wds
 from huggingface_hub import HfFileSystem, get_token, hf_hub_url
 from datasets import load_dataset
 
+import random
+
 from .utils.FlexibleCifar import FlexibleCIFAR10
 
 from PIL import Image
@@ -33,6 +35,7 @@ from diffusers.optimization import get_scheduler as get_lr_scheduler
 
 load_dotenv()
 
+
 def create_random_token_mask(x: torch.Tensor, mask_ratio: float = 0.5) -> torch.Tensor:
     """
     Creates a random boolean mask for the given tensor x such that each sample
@@ -41,23 +44,26 @@ def create_random_token_mask(x: torch.Tensor, mask_ratio: float = 0.5) -> torch.
     Args:
         x (torch.Tensor): Input tensor of shape [b, t, c].
         mask_ratio (float): Fraction of tokens to mask in each sample.
-    
+
     Returns:
         A tuple of boolean masks (expanded to [b, t, c] for tokens) where the 
         inverted mask (~mask) can be used to select visible tokens.
     """
     b, t, c = x.shape
+    # print(f'mask ratio create_random_token_mask: {mask_ratio}')
     num_mask = int(mask_ratio * t)
-    
+    # print(f'num_mask create_random_token_mask: {num_mask}')
+
     rand_scores = torch.rand(b, t, device=x.device)
     _, indices = torch.topk(rand_scores, k=num_mask, dim=1, largest=False)
-    
+
     token_mask = torch.zeros((b, t), dtype=torch.bool, device=x.device)
     token_mask.scatter_(1, indices, True)
-    
+
     mask = token_mask.unsqueeze(-1).expand(b, t, c)
 
     return mask, token_mask
+
 
 class ResizeMaxSide:
     def __init__(self, max_side, interpolation=Image.BILINEAR):
@@ -77,16 +83,18 @@ class ResizeMaxSide:
             img = img.resize((new_width, new_height), self.interpolation)
         return img
 
+
 class ImageNetWebDataset(IterableDataset):
     def __init__(self, split='train', transform=None):
         super().__init__()
         self.transform = transform
 
         try:
-            self.dataset = load_dataset("imagenet-1k", split="train", trust_remote_code=True)
+            self.dataset = load_dataset(
+                "imagenet-1k", split="train", trust_remote_code=True)
         except Exception as e:
             print(e)
-        
+
     def __iter__(self):
         return iter(self.dataset)
 
@@ -101,7 +109,7 @@ def patchify(x: torch.Tensor, p: int) -> torch.Tensor:
     return x
 
 
-def pad_to_max_size(batch, patch_size, tape_dim, mask_ratio, transform=None):
+def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
     images = []
     labels = []
     for example in batch:
@@ -116,14 +124,14 @@ def pad_to_max_size(batch, patch_size, tape_dim, mask_ratio, transform=None):
             example["image"] = example["image"][:3]
         images.append(example["image"])
         labels.append(example["label"])
-    
+
     max_height = max(img.shape[1] for img in images)
     max_width = max(img.shape[2] for img in images)
 
     max_pixels = max_height * max_width
     nmh = max_height // patch_size
     nmw = max_width // patch_size
-    
+
     padded_images = []
     patch_masks = []
     image_masks = []
@@ -133,29 +141,33 @@ def pad_to_max_size(batch, patch_size, tape_dim, mask_ratio, transform=None):
 
         h_crop = h - (h // patch_size) * patch_size
         w_crop = w - (w // patch_size) * patch_size
-        
+
         if h_crop > 0 or w_crop > 0:
             img = img[:, :h - h_crop, :w - w_crop]
             _, h, w = img.shape
 
         if c == 1:
             img = img.repeat(3, 1, 1)
-        
+
         nh = h // patch_size
         nw = w // patch_size
         pixel_row = patchify(img, patch_size)
-        
+
         pos_emb = create_2d_sin_cos_pos_emb(nh, nw, tape_dim)
 
         pixel_mask = torch.ones(h * w)
         patch_mask = torch.ones(nh * nw)
 
         # Pad to max tokens / max patches for consistency across the batch
-        pixel_row = torch.nn.functional.pad(pixel_row, (0, 0, 0, nmh * nmw - pixel_row.shape[0]), value=0)
-        pixel_mask = torch.nn.functional.pad(pixel_mask, (0, max_pixels - pixel_mask.shape[0]), value=0)
-        patch_mask = torch.nn.functional.pad(patch_mask, (0, nmh * nmw - patch_mask.shape[0]), value=0)
-        pos_emb = torch.nn.functional.pad(pos_emb, (0, 0, 0, nmh * nmw - pos_emb.shape[0]), value=0)
-        
+        pixel_row = torch.nn.functional.pad(
+            pixel_row, (0, 0, 0, nmh * nmw - pixel_row.shape[0]), value=0)
+        pixel_mask = torch.nn.functional.pad(
+            pixel_mask, (0, max_pixels - pixel_mask.shape[0]), value=0)
+        patch_mask = torch.nn.functional.pad(
+            patch_mask, (0, nmh * nmw - patch_mask.shape[0]), value=0)
+        pos_emb = torch.nn.functional.pad(
+            pos_emb, (0, 0, 0, nmh * nmw - pos_emb.shape[0]), value=0)
+
         image_masks.append(pixel_mask)
         patch_masks.append(patch_mask)
         padded_images.append(pixel_row)
@@ -167,25 +179,26 @@ def pad_to_max_size(batch, patch_size, tape_dim, mask_ratio, transform=None):
     image_masks = torch.stack(image_masks).bool()
     pos_embs = torch.stack(pos_embs)
 
-    _, token_mask = create_random_token_mask(padded_images, mask_ratio=mask_ratio)
-    
-    visible_padded_images = []
-    visible_patch_masks = []
-    visible_pos_embs = []
-    for i, (padded_image, patch_mask, pos_emb) in enumerate(zip(padded_images, patch_masks, pos_embs)):
-        # print(token_mask[i])
-        visible_idx = ~token_mask[i]
-        visible_padded_images.append(padded_image[visible_idx])
-        visible_patch_masks.append(patch_mask[visible_idx])
-        visible_pos_embs.append(pos_emb[visible_idx])
-    
-    visible_padded_images = torch.stack(visible_padded_images)
-    visible_patch_masks = torch.stack(visible_patch_masks)
-    visible_pos_embs = torch.stack(visible_pos_embs)
+    # _, token_mask = create_random_token_mask(padded_images, mask_ratio=mask_ratio)
+
+    # visible_padded_images = []
+    # visible_patch_masks = []
+    # visible_pos_embs = []
+    # for i, (padded_image, patch_mask, pos_emb) in enumerate(zip(padded_images, patch_masks, pos_embs)):
+    #     # print(token_mask[i])
+    #     visible_idx = ~token_mask[i]
+    #     visible_padded_images.append(padded_image[visible_idx])
+    #     visible_patch_masks.append(patch_mask[visible_idx])
+    #     visible_pos_embs.append(pos_emb[visible_idx])
+
+    # visible_padded_images = torch.stack(visible_padded_images)
+    # visible_patch_masks = torch.stack(visible_patch_masks)
+    # visible_pos_embs = torch.stack(visible_pos_embs)
 
     # print(f'visible_padded_images.shape: {visible_padded_images.shape}')
-    
-    return visible_padded_images, visible_patch_masks, image_masks, labels, visible_pos_embs, nmh, nmw
+
+    # return visible_padded_images, visible_patch_masks, image_masks, labels, visible_pos_embs, nmh, nmw
+    return padded_images, patch_masks, image_masks, labels, pos_embs, nmh, nmw
 
 
 class ImageNetDataModule(LightningDataModule):
@@ -199,19 +212,20 @@ class ImageNetDataModule(LightningDataModule):
             ])
         else:
             self.transform = transforms.Compose([
-                transforms.Resize((128, 128)) if self.config["run"]["vanilla"] else ResizeMaxSide(128),
+                transforms.Resize(
+                    (128, 128)) if self.config["run"]["vanilla"] else ResizeMaxSide(128),
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
             ])
-        
+
         # Add masking schedule parameters
         self.initial_mask_ratio = 0.5
         self.final_mask_ratio = 0.0
         self.total_steps = config["trainer"]["train_num_steps"]
         self.current_step = 0  # Add this to track steps
-    
+
     def setup(self, stage=None):
-        if self.config["run"]["cifar"]: 
+        if self.config["run"]["cifar"]:
             self.train_dataset = FlexibleCIFAR10(
                 "datasets/cifar10_flex",
                 train=True,
@@ -221,12 +235,12 @@ class ImageNetDataModule(LightningDataModule):
                 split='train',
                 # transform=self.transform
             )
-    
+
     def get_current_mask_ratio(self):
-        # Linear schedule from initial_mask_ratio to final_mask_ratio
-        progress = min(self.current_step / self.total_steps, 1.0)
-        return self.initial_mask_ratio + (self.final_mask_ratio - self.initial_mask_ratio) * progress
-    
+        # Random value between initial_mask_ratio and final_mask_ratio
+
+        return random.uniform(self.final_mask_ratio, self.initial_mask_ratio)
+
     def train_dataloader(self):
         return DataLoader(
             self.train_dataset,
@@ -239,7 +253,6 @@ class ImageNetDataModule(LightningDataModule):
                 batch,
                 self.config["rin"]["patch_size"],
                 self.config["rin"]["tape_dim"],
-                mask_ratio=self.get_current_mask_ratio(),
                 transform=self.transform
             )
         )
@@ -251,52 +264,85 @@ class RinLightningModule(LightningModule):
         self.save_hyperparameters(config)
         rin_config = config["rin"]
         diffusion_config = config["diffusion"]
-        
+
         self.automatic_optimization = False
-        
+
         self.rin = Rin(**rin_config)
-        self.rin.pass_dummy_data(num_classes=rin_config["num_classes"])  # Populate lazy model with weights
-        self.diffusion_model = RinDiffusionModel(rin=self.rin, **diffusion_config)
-        
+        # Populate lazy model with weights
+        self.rin.pass_dummy_data(num_classes=rin_config["num_classes"])
+        self.diffusion_model = RinDiffusionModel(
+            rin=self.rin, **diffusion_config)
+
         self.rin_ema = Rin(**rin_config)
         self.rin_ema.pass_dummy_data(num_classes=rin_config["num_classes"])
-        self.ema_diffusion_model = RinDiffusionModel(rin=self.rin_ema, **diffusion_config)
+        self.ema_diffusion_model = RinDiffusionModel(
+            rin=self.rin_ema, **diffusion_config)
         self.ema_decay = config["trainer"]["ema_decay"]
         self.ema_update_every = config["trainer"]["ema_update_every"]
-        
+
         self.sample_every = config["trainer"]["sample_every"]
         self.sampling_kwargs = config["trainer"]["sampling_kwargs"]
         self.tape_dim = rin_config["tape_dim"]
         self.num_classes = rin_config["num_classes"]
         self.patch_size = rin_config["patch_size"]
-        
+
         # Add masking schedule parameters
         self.initial_mask_ratio = 0.5
         self.final_mask_ratio = 0.0
         self.total_steps = config["trainer"]["train_num_steps"]
-    
+
     def get_current_mask_ratio(self):
-        # Linear schedule from initial_mask_ratio to final_mask_ratio
-        progress = min(self.global_step / self.total_steps, 1.0)
-        return self.initial_mask_ratio + (self.final_mask_ratio - self.initial_mask_ratio) * progress
-    
-    def forward(self, batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw, mask_ratio):
+        # Random value between initial_mask_ratio and final_mask_ratio
+
+        # progress = min(self.global_step / self.total_steps, 1.0)
+        # return self.initial_mask_ratio + (self.final_mask_ratio - self.initial_mask_ratio) * progress
+        return random.uniform(self.final_mask_ratio, self.initial_mask_ratio)
+
+    def forward(self, batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw, mask_ratio, tape_length):
         # print(f'mask_ratio_forward: {mask_ratio}')
-        return self.diffusion_model(batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw, mask_ratio)
-    
+        return self.diffusion_model(batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw, mask_ratio, tape_length)
+
     def training_step(self, batch, batch_idx):
         opt = self.optimizers()
-        
+
         # Update the step counter in the DataModule
         self.trainer.datamodule.current_step = self.global_step
-        
-        batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw = batch
-        batch_class = torch.nn.functional.one_hot(batch_class, num_classes=self.num_classes).float()
+
+        mask_ratio = self.trainer.datamodule.get_current_mask_ratio()
+
+        # batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw = batch
+
+        padded_images, patch_masks, image_masks, batch_class, pos_embs, nmh, nmw = batch
+
+        _, token_mask = create_random_token_mask(
+            padded_images, mask_ratio=mask_ratio)
+
+        visible_padded_images = []
+        visible_patch_masks = []
+        visible_pos_embs = []
+        for i, (padded_image, patch_mask, pos_emb) in enumerate(zip(padded_images, patch_masks, pos_embs)):
+            # print(token_mask[i])
+            visible_idx = ~token_mask[i]
+            visible_padded_images.append(padded_image[visible_idx])
+            visible_patch_masks.append(patch_mask[visible_idx])
+            visible_pos_embs.append(pos_emb[visible_idx])
+
+        visible_padded_images = torch.stack(visible_padded_images)
+        visible_patch_masks = torch.stack(visible_patch_masks)
+        visible_pos_embs = torch.stack(visible_pos_embs)
+
+        batch_class = torch.nn.functional.one_hot(
+            batch_class, num_classes=self.num_classes).float()
 
         opt.zero_grad()
-        mask_ratio = self.trainer.datamodule.get_current_mask_ratio()
+        # mask_ratio = self.trainer.datamodule.get_current_mask_ratio()
+        mask_ratio = 1 - (visible_padded_images.shape[1] / (nmh * nmw))
+
+        tape_length = visible_padded_images.shape[1]
         # print(f'mask_ratio_trainer: {mask_ratio}')
-        loss = self(batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw, mask_ratio)
+        # loss = self(batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw, mask_ratio)
+        loss = self(visible_padded_images, visible_patch_masks, image_masks,
+                    batch_class, visible_pos_embs, nmh, nmw, mask_ratio, tape_length)
         self.manual_backward(loss)
         opt.step()
 
@@ -306,7 +352,8 @@ class RinLightningModule(LightningModule):
         logs = {
             "loss": loss.item(),
             "lr": sch.get_last_lr()[0],
-            "mask_ratio": self.trainer.datamodule.get_current_mask_ratio(),
+            # "mask_ratio": self.trainer.datamodule.get_current_mask_ratio(),
+            "mask_ratio": mask_ratio
         }
 
         self.log_dict(logs, on_step=True, prog_bar=True)
@@ -322,17 +369,26 @@ class RinLightningModule(LightningModule):
         if self.global_step % self.sample_every == 0:
             self.ema_diffusion_model.eval()
             n = 8
-            samples = self.ema_diffusion_model.sample(num_samples=n * n, image_height=32, image_width=32, tape_dim=self.tape_dim, **self.sampling_kwargs)
-            grid = torchvision.utils.make_grid(samples, nrow=n, normalize=True, value_range=(0, 1), padding=0)
-            self.logger.experiment.log({"samples": [wandb.Image(grid)]}, step=self.global_step)
+            samples = self.ema_diffusion_model.sample(
+                num_samples=n * n, image_height=32, image_width=32, tape_dim=self.tape_dim, **self.sampling_kwargs)
+            grid = torchvision.utils.make_grid(
+                samples, nrow=n, normalize=True, value_range=(0, 1), padding=0)
+            self.logger.experiment.log(
+                {"samples": [wandb.Image(grid)]}, step=self.global_step)
 
-            samples_horizontal = self.ema_diffusion_model.sample(num_samples=n * n, image_height=24, image_width=32, tape_dim=self.tape_dim, **self.sampling_kwargs)
-            grid_horizontal = torchvision.utils.make_grid(samples_horizontal, nrow=n, normalize=True, value_range=(0, 1), padding=0)
-            self.logger.experiment.log({"samples_horizontal": [wandb.Image(grid_horizontal)]}, step=self.global_step)
+            samples_horizontal = self.ema_diffusion_model.sample(
+                num_samples=n * n, image_height=24, image_width=32, tape_dim=self.tape_dim, **self.sampling_kwargs)
+            grid_horizontal = torchvision.utils.make_grid(
+                samples_horizontal, nrow=n, normalize=True, value_range=(0, 1), padding=0)
+            self.logger.experiment.log(
+                {"samples_horizontal": [wandb.Image(grid_horizontal)]}, step=self.global_step)
 
-            samples_vertical = self.ema_diffusion_model.sample(num_samples=n * n, image_height=32, image_width=24, tape_dim=self.tape_dim, **self.sampling_kwargs)
-            grid_vertical = torchvision.utils.make_grid(samples_vertical, nrow=n, normalize=True, value_range=(0, 1), padding=0)
-            self.logger.experiment.log({"samples_vertical": [wandb.Image(grid_vertical)]}, step=self.global_step)
+            samples_vertical = self.ema_diffusion_model.sample(
+                num_samples=n * n, image_height=32, image_width=24, tape_dim=self.tape_dim, **self.sampling_kwargs)
+            grid_vertical = torchvision.utils.make_grid(
+                samples_vertical, nrow=n, normalize=True, value_range=(0, 1), padding=0)
+            self.logger.experiment.log(
+                {"samples_vertical": [wandb.Image(grid_vertical)]}, step=self.global_step)
 
             del samples
             del samples_horizontal
@@ -340,7 +396,7 @@ class RinLightningModule(LightningModule):
             self.ema_diffusion_model.train()
 
         return loss
-    
+
     def configure_optimizers(self):
         optimizer = get_optimizer(
             self.hparams["trainer"]["optimizer_name"],
@@ -353,14 +409,14 @@ class RinLightningModule(LightningModule):
             lr=self.hparams["trainer"]["lr"],
             **self.hparams["trainer"]["optimizer_kwargs"],
         )
-        
+
         scheduler = get_lr_scheduler(
-                self.hparams["trainer"]["lr_scheduler_name"],
-                optimizer,
-                num_warmup_steps=self.hparams["trainer"]["lr_warmup_steps"],
-                num_training_steps=self.hparams["trainer"]["train_num_steps"],
-            )
-        
+            self.hparams["trainer"]["lr_scheduler_name"],
+            optimizer,
+            num_warmup_steps=self.hparams["trainer"]["lr_warmup_steps"],
+            num_training_steps=self.hparams["trainer"]["train_num_steps"],
+        )
+
         return {
             "optimizer": optimizer,
             "lr_scheduler": {

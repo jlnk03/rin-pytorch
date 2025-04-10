@@ -305,7 +305,9 @@ class Rin(torch.nn.Module):
         if not self._cond_on_latent and cond is not None:
             tape_r = _concat_tokens(tape_r, cond)
 
+        # print(f'x shape initialize_tape: {x.shape}')
         tape = self.stem(x)
+        # print(f'tape shape initialize_tape: {tape.shape}')
 
         pos_embs = pos_embs.to(tape.device)
         tape = self.stem_ln(tape)
@@ -345,6 +347,7 @@ class Rin(torch.nn.Module):
         tape_r: torch.Tensor | None,
         masks: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # print(f'tape shape compute: {tape.shape}')
         for i in range(len(self._num_layers)):
             # pass masks to read and write units
             if self._cond_decoupled_read:
@@ -355,6 +358,7 @@ class Rin(torch.nn.Module):
                 latent = self.read_units[i](latent, tape_merged, masks, mode="read")
             latent = self.latent_processing_units[i](latent)
             tape = self.write_units[i](tape, latent, mode="write")
+            # print(f'tape shape compute index: {i}: {tape.shape}')
         return latent, tape
 
     def readout_tape(self, tape: torch.Tensor, n_rows: int, n_cols: int) -> torch.Tensor:
@@ -434,6 +438,7 @@ class Rin(torch.nn.Module):
         latent_prev: torch.Tensor | None = None,
         tape_prev: torch.Tensor | None = None,
         mask_ratio: float = 0.0,
+        tape_length: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # assert x.ndim == 4
         bs = x.shape[0]
@@ -446,7 +451,8 @@ class Rin(torch.nn.Module):
 
         if tape_prev is None:
             # tape_prev = torch.zeros(bs, *self.tape_shape, device=x.device)
-            tape_shape = [int(nmh * nmw * (1 - mask_ratio)), self._tape_dim]
+            # tape_shape = [int(nmh * nmw * (1 - mask_ratio)), self._tape_dim]
+            tape_shape = [tape_length, self._tape_dim]
             tape_prev = torch.zeros(bs, *tape_shape, device=x.device)
 
         if self._cond_on_latent and cond is None:
@@ -458,12 +464,16 @@ class Rin(torch.nn.Module):
         latent = self.initialize_latent(bs, time_emb, cond, latent_prev)
         latent, tape = self.compute(latent, tape, tape_r, masks)
         x = self.readout_tape(tape, nmh, nmw)
-        tape_slots = int(nmh * nmw * (1 - mask_ratio))
+        # tape_slots = int(nmh * nmw * (1 - mask_ratio))
         # return x, latent, tape[:, : self._tape_slots]
         # TODO: Check if the tape shape is actually correct ie if the second dim should not be tape_dim and first dim : tape_slots
         # TODO: Check tensorflow implementation to verify tape shape
         # TODO: If this works rerun previous runs to see if this affected the previous results!
-        return x, latent, tape[: tape_slots, : self._tape_dim]
+        # print(f'tape shape rin 1: {tape.shape}')
+        # print(f'tape_slots: {tape_slots}')
+        # tape = tape[: tape_slots, : self._tape_dim]
+        # print(f'tape shape rin 2: {tape.shape}')
+        return x, latent, tape
 
     def load_weights_numpy(self, np_file):
         # load weights from numpy file relying on the order of parameters
