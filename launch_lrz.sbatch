@@ -13,5 +13,5 @@
 echo "Starting the job"
 echo "Job ID: $SLURM_JOB_ID"
 # srun python train.py --config configs/128.yaml --wandb_resume v62ghl29 --resume_checkpoint /dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/imagenet/imagenet_lin_masked_large_ps_4_50_0_20250406_233825/last.ckpt
-srun python train.py --config configs/cifar.yaml
+srun python train.py --config configs/128.yaml
 echo "Job finished"

@@ -51,8 +51,6 @@ class Rin(torch.nn.Module):
         cond_decoupled_read=False,
         xattn_enc_ln=False,
         num_classes=None,
-        pre_tokenized: bool = False,
-        mask_ratio: float = 0.3,
     ):
         super().__init__()
 
@@ -61,10 +59,10 @@ class Rin(torch.nn.Module):
         self._image_channels = image_channels
         self._n_rows = image_height // patch_size
         self._n_cols = image_width // patch_size
-        self._num_tokens = int(self._n_rows * self._n_cols * (1 - mask_ratio))
+        # self._num_tokens = int(self._n_rows * self._n_cols * (1 - mask_ratio))
         self._patch_size = patch_size
         self._output_dim = patch_size**2 * image_channels
-        self.mask_ratio = mask_ratio
+        # self.mask_ratio = mask_ratio
 
         self._num_layers = [int(i) for i in num_layers.split(",")]
         self._latent_slots = latent_slots
@@ -74,7 +72,7 @@ class Rin(torch.nn.Module):
             latent_slots -= 1
         latent_slots -= cond_on_latent_n
         self._latent_dim = latent_dim
-        self._tape_slots = self._num_tokens
+        # self._tape_slots = self._num_tokens
         self._tape_dim = tape_dim
         self._cond_dim = cond_dim = cond_dim if cond_dim > 0 else tape_dim
         self._latent_pos_encoding = latent_pos_encoding
@@ -380,9 +378,9 @@ class Rin(torch.nn.Module):
     def latent_shape(self) -> list[int]:
         return [self._latent_slots, self._latent_dim]
 
-    @property
-    def tape_shape(self) -> list[int]:
-        return [self._tape_slots, self._tape_dim]
+    # @property
+    # def tape_shape(self) -> list[int]:
+    #     return [self._tape_slots, self._tape_dim]
 
     @property
     def image_shape(self) -> list[int]:
@@ -437,7 +435,6 @@ class Rin(torch.nn.Module):
         nmw: torch.Tensor | None = None,
         latent_prev: torch.Tensor | None = None,
         tape_prev: torch.Tensor | None = None,
-        mask_ratio: float = 0.0,
         tape_length: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # assert x.ndim == 4

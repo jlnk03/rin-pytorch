@@ -62,14 +62,12 @@ class RinDiffusionModel(torch.nn.Module):
         nmw: torch.Tensor | None = None,
         latent_prev: torch.Tensor | None = None,
         tape_prev: torch.Tensor | None = None,
-        mask_ratio: float = 0.0,
         tape_length: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         gamma = gamma.squeeze()
         assert gamma.ndim == 1
         # print(f'pos_embs_denoise: {pos_embs.shape}')
-        # print(f'mask ratio: {mask_ratio}')
-        output, latent, tape = self.denoiser(x, gamma, masks, cond, pos_embs, nmh, nmw, latent_prev, tape_prev, mask_ratio, tape_length)
+        output, latent, tape = self.denoiser(x, gamma, masks, cond, pos_embs, nmh, nmw, latent_prev, tape_prev, tape_length)
         return output, latent, tape
 
     @torch.no_grad()
@@ -195,7 +193,7 @@ class RinDiffusionModel(torch.nn.Module):
 
             # Denoise with current samples
             pred_out, latent_prev, tape_prev = self.denoise(
-                samples, gamma, cond, mask_out, pos_embs, nmh, nmw, latent_prev, tape_prev, mask_ratio=0.0, tape_length=tape_length
+                samples, gamma, cond, mask_out, pos_embs, nmh, nmw, latent_prev, tape_prev, tape_length=tape_length
             )
 
             # Convert model output to x0 and eps
@@ -238,7 +236,6 @@ class RinDiffusionModel(torch.nn.Module):
         nmh: torch.Tensor,
         nmw: torch.Tensor,
         t: torch.Tensor | None = None,
-        mask_ratio: float = 0.0,
         tape_length: int = 0,
     ):
 
@@ -257,12 +254,11 @@ class RinDiffusionModel(torch.nn.Module):
 
             if torch.any(mask):
                 # print(f'mask shape: {mask.shape}')
-                print(f'tape_prev shape: {tape_prev.shape}')
-                print(f'tape_shape: {tape_shape}')
-                print(f'mask_ratio_noise_denoise: {mask_ratio}')
-                print(f'images_noised shape: {images_noised.shape}')
-                print(f'nmh: {nmh}')
-                print(f'nmw: {nmw}')
+                # print(f'tape_prev shape: {tape_prev.shape}')
+                # print(f'tape_shape: {tape_shape}')
+                # print(f'images_noised shape: {images_noised.shape}')
+                # print(f'nmh: {nmh}')
+                # print(f'nmw: {nmw}')
                 with torch.no_grad():
                     _, latent_prev_out, tape_prev_out = self.denoise(
                         x=images_noised[mask],
@@ -272,17 +268,16 @@ class RinDiffusionModel(torch.nn.Module):
                         pos_embs=pos_embs[mask],
                         nmh=nmh,
                         nmw=nmw,
-                        mask_ratio=mask_ratio,
                         tape_length=tape_length,
                     )
 
-                print(f'tape_prev_out: {tape_prev_out.shape}')
+                # print(f'tape_prev_out: {tape_prev_out.shape}')
 
                 latent_prev[mask] = latent_prev_out.detach()
                 tape_prev[mask] = tape_prev_out.detach()
 
         # pass masks to denoise
-        denoise_out, _, _ = self.denoise(images_noised, gamma, labels, masks, pos_embs, nmh, nmw, latent_prev, tape_prev, mask_ratio=mask_ratio, tape_length=tape_length)
+        denoise_out, _, _ = self.denoise(images_noised, gamma, labels, masks, pos_embs, nmh, nmw, latent_prev, tape_prev, tape_length=tape_length)
         # print(f'denoise_out: {denoise_out.shape}')
         # print(f'gamma: {gamma.shape}')
         # print(f'images_noised: {images_noised.shape}')
@@ -314,7 +309,6 @@ class RinDiffusionModel(torch.nn.Module):
         pos_embs: torch.Tensor,
         nmh: torch.Tensor,
         nmw: torch.Tensor,
-        mask_ratio: float = 0.0,
         tape_length: int = 0,
         t: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -322,7 +316,7 @@ class RinDiffusionModel(torch.nn.Module):
         # print(f'images_init: {images.shape}')
         # print(f'mask ratio computed: {1 - (images.shape[1] / (nmh * nmw))}')
         # print(f'mask ratio forward diffusion: {mask_ratio}')
-        images, noise, _, pred_dict = self.noise_denoise(images, masks, labels, pos_embs, nmh, nmw, t=t, mask_ratio=mask_ratio, tape_length=tape_length)
+        images, noise, _, pred_dict = self.noise_denoise(images, masks, labels, pos_embs, nmh, nmw, t=t, tape_length=tape_length)
 
         images = images[masks]
         noise = noise[masks]
