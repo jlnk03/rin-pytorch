@@ -159,15 +159,13 @@ def pad_to_max_size(batch, patch_size, tape_dim, transform=None, initial_mask_ra
     nmh = max_height // patch_size
     nmw = max_width // patch_size
 
-    padded_images = []
-    patch_masks = []
-    image_masks = []
-    pos_embs = []
-
+    # Prepare all samples with their metadata
+    samples = []
     max_size = 0
-    min_size = 0
+    min_size = float('inf')
     original_token_counts = []  # Keep track of original token counts
-    for img in images:
+    
+    for i, img in enumerate(images):
         c, h, w = img.shape
 
         h_crop = h - (h // patch_size) * patch_size
@@ -197,72 +195,98 @@ def pad_to_max_size(batch, patch_size, tape_dim, transform=None, initial_mask_ra
         patch_mask = patch_mask[token_mask]
         pos_emb = pos_emb[token_mask]
 
-        original_token_count = pixel_row.shape[0] # Store token count before padding
-        original_token_counts.append(original_token_count)
+        token_length = pixel_row.shape[0]
+        original_token_counts.append(token_length)
+        
+        img_id_vec = torch.full([token_length], i, dtype=torch.long)
+        token_img_id = [img_id_vec]
+        
+        samples.append({
+            "x": pixel_row,
+            "patch_mask": patch_mask,
+            "image_mask": pixel_mask,
+            "pos_emb": pos_emb,
+            "label": labels[i],
+            "length": token_length,
+            "token_img_id": token_img_id
+        })
+        
+        max_size = max(max_size, token_length)
+        min_size = min(min_size, token_length)
 
-        max_size = max(max_size, pixel_row.shape[0])
-        if min_size == 0:
-            min_size = pixel_row.shape[0]
-        else:
-            min_size = min(min_size, pixel_row.shape[0])
+    # Sort samples by descending length for first-fit decreasing algorithm
+    samples.sort(key=lambda s: s["length"], reverse=True)
 
-        # Pad to max tokens / max patches for consistency across the batch
-        pixel_row = torch.nn.functional.pad(
-            pixel_row, (0, 0, 0, nmh * nmw - pixel_row.shape[0]), value=0)
-        pixel_mask = torch.nn.functional.pad(
-            pixel_mask, (0, max_pixels - pixel_mask.shape[0]), value=0)
-        patch_mask = torch.nn.functional.pad(
-            patch_mask, (0, nmh * nmw - patch_mask.shape[0]), value=0)
-        pos_emb = torch.nn.functional.pad(
-            pos_emb, (0, 0, 0, nmh * nmw - pos_emb.shape[0]), value=0)
+    # Set maximum sequence length
+    max_seq_len = 256
 
-        image_masks.append(pixel_mask)
-        patch_masks.append(patch_mask)
-        padded_images.append(pixel_row)
-        pos_embs.append(pos_emb)
+    # First-fit decreasing bin packing
+    bins = []  # each bin is {"length": int, "samples": [...]}
 
-    print(f'max size: {max_size}')
-    print(f'min size: {min_size}')
-    print('here')
-    labels = torch.tensor(labels)
-    padded_images = torch.stack(padded_images)
-    patch_masks = torch.stack(patch_masks).bool()
-    image_masks = torch.stack(image_masks).bool()
-    pos_embs = torch.stack(pos_embs)
+    for sample in samples:
+        placed = False
+        for bin in bins:
+            if bin["length"] + sample["length"] <= max_seq_len:
+                bin["samples"].append(sample)
+                bin["length"] += sample["length"]
+                placed = True
+                break
+        if not placed:
+            # Start a new bin
+            bins.append({"length": sample["length"], "samples": [sample]})
 
-    # Crop to max token length after masking
-    patch_masks = patch_masks[:, :max_size]
-    pos_embs = pos_embs[:, :max_size]
-    padded_images = padded_images[:, :max_size]
+    # Pack samples into batched tensors
+    packed_images = []
+    packed_patch_masks = []
+    packed_image_masks = []
+    packed_pos_embs = []
+    packed_labels = []
+    packed_token_img_ids = []
+    
+    for bin in bins:
+        # Concatenate all samples in this bin
+        pixels = torch.cat([s["x"] for s in bin["samples"]], dim=0)
+        patches = torch.cat([s["patch_mask"] for s in bin["samples"]], dim=0)
+        img_masks = torch.cat([s["image_mask"] for s in bin["samples"]], dim=0)
+        pos_embeddings = torch.cat([s["pos_emb"] for s in bin["samples"]], dim=0)
+        token_img_ids = torch.cat([torch.cat(s["token_img_id"]) for s in bin["samples"]], dim=0)
 
-    # Calculate padding percentage
-    total_tokens = padded_images.shape[0] * padded_images.shape[1]
-    total_original_tokens = sum(original_token_counts)
-    num_padding_tokens = total_tokens - total_original_tokens
-    padding_percentage = (num_padding_tokens / total_tokens) * 100 if total_tokens > 0 else 0
+        pixels = torch.nn.functional.pad(pixels, (0, 0, 0, max_seq_len - bin['length']))
+        patches = torch.nn.functional.pad(patches, (0, max_seq_len - bin['length']))
+        img_masks = torch.nn.functional.pad(img_masks, (0, max_seq_len * patch_size * patch_size - img_masks.shape[0]))
+        pos_embeddings = torch.nn.functional.pad(pos_embeddings, (0, 0, 0, max_seq_len - bin['length']))
+        token_img_ids = torch.nn.functional.pad(token_img_ids, (0, max_seq_len - bin['length']), value=-1)
+        
+        # For labels, use the label of the first sample in the bin
+        # You might want a different strategy here depending on your use case
+        bin_label = bin["samples"][0]["label"]
+        
+        packed_images.append(pixels)
+        packed_patch_masks.append(patches)
+        packed_image_masks.append(img_masks)
+        packed_pos_embs.append(pos_embeddings)
+        packed_labels.append(bin_label)
+        packed_token_img_ids.append(token_img_ids)
 
-    min_max_ratio = min_size / max_size
+    # Convert lists to tensors
+    padded_images = torch.stack(packed_images)
+    patch_masks = torch.stack(packed_patch_masks).bool()
+    image_masks = torch.stack(packed_image_masks).bool()
+    pos_embs = torch.stack(packed_pos_embs)
+    labels = torch.tensor(packed_labels)
+    token_img_ids = torch.stack(packed_token_img_ids)
 
-    # _, token_mask = create_random_token_mask(padded_images, mask_ratio=mask_ratio)
+    # Calculate efficiency metrics
+    total_tokens = sum(bin["length"] for bin in bins)
+    total_capacity = len(bins) * max_seq_len
+    padding_percentage = ((total_capacity - total_tokens) / total_capacity) * 100 if total_capacity > 0 else 0
+    min_max_ratio = min_size / max_size if max_size > 0 else 0
 
-    # visible_padded_images = []
-    # visible_patch_masks = []
-    # visible_pos_embs = []
-    # for i, (padded_image, patch_mask, pos_emb) in enumerate(zip(padded_images, patch_masks, pos_embs)):
-    #     # print(token_mask[i])
-    #     visible_idx = ~token_mask[i]
-    #     visible_padded_images.append(padded_image[visible_idx])
-    #     visible_patch_masks.append(patch_mask[visible_idx])
-    #     visible_pos_embs.append(pos_emb[visible_idx])
+    print(f"Packed {len(samples)} samples into {len(bins)} bins with {padding_percentage:.2f}% padding")
+    print(f"Total tokens: {total_tokens}, capacity: {total_capacity}")
+    print(f"padded_images.shape: {padded_images.shape}")
 
-    # visible_padded_images = torch.stack(visible_padded_images)
-    # visible_patch_masks = torch.stack(visible_patch_masks)
-    # visible_pos_embs = torch.stack(visible_pos_embs)
-
-    # print(f'visible_padded_images.shape: {visible_padded_images.shape}')
-
-    # return visible_padded_images, visible_patch_masks, image_masks, labels, visible_pos_embs, nmh, nmw
-    return padded_images, patch_masks, image_masks, labels, pos_embs, nmh, nmw, max_size, min_size, padding_percentage, min_max_ratio
+    return padded_images, patch_masks, image_masks, labels, pos_embs, token_img_ids, nmh, nmw, max_size, min_size, padding_percentage, min_max_ratio
 
 
 class ImageNetDataModule(LightningDataModule):
@@ -364,9 +388,9 @@ class RinLightningModule(LightningModule):
         # return self.initial_mask_ratio + (self.final_mask_ratio - self.initial_mask_ratio) * progress
         return random.uniform(self.final_mask_ratio, self.initial_mask_ratio)
 
-    def forward(self, batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw, tape_length):
+    def forward(self, batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw, tape_length, img_ids=None):
         # print(f'mask_ratio_forward: {mask_ratio}')
-        return self.diffusion_model(batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw, tape_length)
+        return self.diffusion_model(batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw, tape_length, img_ids=img_ids)
 
     def training_step(self, batch, batch_idx):
         opt = self.optimizers()
@@ -378,7 +402,7 @@ class RinLightningModule(LightningModule):
 
         # batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw = batch
 
-        padded_images, patch_masks, image_masks, batch_class, pos_embs, nmh, nmw, max_size, min_size, padding_percentage, min_max_ratio = batch # Unpack padding_percentage
+        padded_images, patch_masks, image_masks, batch_class, pos_embs, token_img_ids, nmh, nmw, max_size, min_size, padding_percentage, min_max_ratio = batch # Unpack padding_percentage
 
         # _, token_mask = create_random_token_mask(
         #     padded_images, mask_ratio=mask_ratio)
@@ -414,7 +438,7 @@ class RinLightningModule(LightningModule):
         # print(f'mask_ratio_trainer: {mask_ratio}')
         # loss = self(batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw, mask_ratio)
         loss = self(padded_images, patch_masks, image_masks,
-                    batch_class, pos_embs, nmh, nmw, tape_length)
+                    batch_class, pos_embs, nmh, nmw, tape_length, img_ids=token_img_ids)
         self.manual_backward(loss)
         opt.step()
 

@@ -310,6 +310,7 @@ class RinDiffusionModel(torch.nn.Module):
         nmh: torch.Tensor,
         nmw: torch.Tensor,
         tape_length: int = 0,
+        img_ids: torch.Tensor | None = None,
         t: torch.Tensor | None = None,
     ) -> torch.Tensor:
  
