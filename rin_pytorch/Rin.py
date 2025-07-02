@@ -67,6 +67,7 @@ class Rin(torch.nn.Module):
         self.mask_ratio = mask_ratio
 
         self._num_layers = [int(i) for i in num_layers.split(",")]
+        # self._latent_slots = latent_slots
         self._latent_slots = latent_slots
         self._time_on_latent = time_on_latent
         self._cond_on_latent = cond_on_latent_n > 0
@@ -226,6 +227,8 @@ class Rin(torch.nn.Module):
         latent_pos_encoding: str,
         time_scaling: float,
     ) -> None:
+
+        latent_slots = 128
         if latent_pos_encoding in ["sin_cos", "sin_cos_plus_learned"]:
             self.register_buffer(
                 "latent_pos_emb",
@@ -325,17 +328,21 @@ class Rin(torch.nn.Module):
         cond: torch.Tensor | None,
         latent_prev: torch.Tensor | None,
     ) -> torch.Tensor:
+        batch_size = 4
         latent = self.latent_pos_emb
         if self._latent_pos_encoding in ["sin_cos_plus_learned"]:
             latent = latent + self.latent_pos_emb_res
-        latent = latent.repeat(batch_size, 1, 1)
-        if self._time_on_latent and time_emb is not None:
-            latent = _concat_tokens(latent, time_emb)
-        if self._cond_on_latent and cond is not None:
-            latent = _concat_tokens(latent, cond)
-        if self._self_cond in ["latent", "latent+tape"] and latent_prev is not None:
-            latent = latent + \
-                self.latent_prev_ln(self.latent_prev_proj(latent_prev))
+        print(f'latent 1: {latent.shape}')
+        latent = latent.repeat(batch_size, 1)
+        print(f'latent 2: {latent.shape}')
+        # if self._time_on_latent and time_emb is not None:
+        #     latent = _concat_tokens(latent, time_emb)
+        # TODO: add cond and latent_prev
+        # if self._cond_on_latent and cond is not None:
+        #     latent = _concat_tokens(latent, cond)
+        # if self._self_cond in ["latent", "latent+tape"] and latent_prev is not None:
+        #     latent = latent + \
+        #         self.latent_prev_ln(self.latent_prev_proj(latent_prev))
         return latent
 
     def compute(
@@ -344,15 +351,16 @@ class Rin(torch.nn.Module):
         tape: torch.Tensor,
         tape_r: torch.Tensor | None,
         masks: torch.Tensor | None = None,
+        block_masks: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         for i in range(len(self._num_layers)):
             # pass masks to read and write units
             if self._cond_decoupled_read:
-                latent = self.read_cond_units[i](latent, tape_r, masks, mode="read")
-                latent = self.read_units[i](latent, tape, masks, mode="read")
+                latent = self.read_cond_units[i](latent, tape_r, masks, mode="read", block_masks=block_masks)
+                latent = self.read_units[i](latent, tape, masks, mode="read", block_masks=block_masks)
             else:
                 tape_merged = _concat_tokens(tape, tape_r)
-                latent = self.read_units[i](latent, tape_merged, masks, mode="read")
+                latent = self.read_units[i](latent, tape_merged, masks, mode="read", block_masks=block_masks)
             latent = self.latent_processing_units[i](latent)
             tape = self.write_units[i](tape, latent, mode="write")
         return latent, tape
@@ -431,6 +439,7 @@ class Rin(torch.nn.Module):
         pos_embs: torch.Tensor | None = None,
         nmh: torch.Tensor | None = None,
         nmw: torch.Tensor | None = None,
+        block_masks: torch.Tensor | None = None,
         latent_prev: torch.Tensor | None = None,
         tape_prev: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -453,7 +462,7 @@ class Rin(torch.nn.Module):
         tape, tape_r = self.initialize_tape(
             x, masks, time_emb, cond, pos_embs, nmh, nmw, tape_prev)
         latent = self.initialize_latent(bs, time_emb, cond, latent_prev)
-        latent, tape = self.compute(latent, tape, tape_r, masks)
+        latent, tape = self.compute(latent, tape, tape_r, masks, block_masks)
         x = self.readout_tape(tape, nmh, nmw)
         return x, latent, tape[:, : self._tape_slots]
 

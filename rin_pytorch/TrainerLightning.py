@@ -8,6 +8,15 @@ from pytorch_lightning import LightningModule, LightningDataModule
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import WandbLogger
 
+from typing import List, Tuple
+
+
+from torch.nn.attention.flex_attention import (
+    create_block_mask,
+    create_mask,
+    flex_attention,
+)
+
 import webdataset as wds
 from huggingface_hub import HfFileSystem, get_token, hf_hub_url
 from datasets import load_dataset
@@ -32,6 +41,45 @@ from dotenv import load_dotenv
 from diffusers.optimization import get_scheduler as get_lr_scheduler
 
 load_dotenv()
+
+
+def precompute_image_ids(
+    img_lengths: List[int], latent_len: int, device: str = "cuda"
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Precompute image IDs for both query and key/value tokens.
+    
+    Returns:
+        Tuple of (query_ids, kv_ids) tensors
+    """
+    n_images = len(img_lengths)
+    
+    # For queries: each image has exactly latent_len queries
+    total_q = n_images * latent_len
+    query_ids = torch.arange(n_images, device=device).repeat_interleave(latent_len)
+    
+    # For key/value tokens: each image has img_lengths[i] tokens
+    total_kv = sum(img_lengths)
+    kv_ids = torch.zeros(total_kv, dtype=torch.long, device=device)
+    
+    offset = 0
+    for i, length in enumerate(img_lengths):
+        kv_ids[offset:offset+length] = i
+        offset += length
+    
+    return query_ids, kv_ids
+
+
+# query_ids = []
+# kv_ids = []
+# total_kv = 0
+
+# def rin_mask_mod(b, h, q_idx, kv_idx):
+#     # Look up precomputed IDs
+#     kv_idx = torch.clamp(kv_idx, 0, total_kv - 1)
+#     return query_ids[q_idx] == kv_ids[kv_idx]
+
+
 
 def create_random_token_mask(x: torch.Tensor, mask_ratio: float = 0.5) -> torch.Tensor:
     """
@@ -128,6 +176,8 @@ def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
     patch_masks = []
     image_masks = []
     pos_embs = []
+    pixel_ranges = []
+    patch_ranges = []
     for img in images:
         c, h, w = img.shape
 
@@ -151,10 +201,13 @@ def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
         patch_mask = torch.ones(nh * nw)
 
         # Pad to max tokens / max patches for consistency across the batch
-        pixel_row = torch.nn.functional.pad(pixel_row, (0, 0, 0, nmh * nmw - pixel_row.shape[0]), value=0)
-        pixel_mask = torch.nn.functional.pad(pixel_mask, (0, max_pixels - pixel_mask.shape[0]), value=0)
-        patch_mask = torch.nn.functional.pad(patch_mask, (0, nmh * nmw - patch_mask.shape[0]), value=0)
-        pos_emb = torch.nn.functional.pad(pos_emb, (0, 0, 0, nmh * nmw - pos_emb.shape[0]), value=0)
+        # pixel_row = torch.nn.functional.pad(pixel_row, (0, 0, 0, nmh * nmw - pixel_row.shape[0]), value=0)
+        # pixel_mask = torch.nn.functional.pad(pixel_mask, (0, max_pixels - pixel_mask.shape[0]), value=0)
+        # patch_mask = torch.nn.functional.pad(patch_mask, (0, nmh * nmw - patch_mask.shape[0]), value=0)
+        # pos_emb = torch.nn.functional.pad(pos_emb, (0, 0, 0, nmh * nmw - pos_emb.shape[0]), value=0)
+
+        pixel_ranges.append(len(pixel_mask))
+        patch_ranges.append(len(patch_mask))
         
         image_masks.append(pixel_mask)
         patch_masks.append(patch_mask)
@@ -162,30 +215,57 @@ def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
         pos_embs.append(pos_emb)
 
     labels = torch.tensor(labels)
-    padded_images = torch.stack(padded_images)
-    patch_masks = torch.stack(patch_masks).bool()
-    image_masks = torch.stack(image_masks).bool()
-    pos_embs = torch.stack(pos_embs)
+    padded_images = torch.cat(padded_images)
+    patch_masks = torch.cat(patch_masks).bool()
+    image_masks = torch.cat(image_masks).bool()
+    pos_embs = torch.cat(pos_embs)
 
-    _, token_mask = create_random_token_mask(padded_images, mask_ratio=0.3)
+    # _, token_mask = create_random_token_mask(padded_images, mask_ratio=0.3)
     
-    visible_padded_images = []
-    visible_patch_masks = []
-    visible_pos_embs = []
-    for i, (padded_image, patch_mask, pos_emb) in enumerate(zip(padded_images, patch_masks, pos_embs)):
-        # print(token_mask[i])
-        visible_idx = ~token_mask[i]
-        visible_padded_images.append(padded_image[visible_idx])
-        visible_patch_masks.append(patch_mask[visible_idx])
-        visible_pos_embs.append(pos_emb[visible_idx])
+    # visible_padded_images = []
+    # visible_patch_masks = []
+    # visible_pos_embs = []
+    # for i, (padded_image, patch_mask, pos_emb) in enumerate(zip(padded_images, patch_masks, pos_embs)):
+    #     # print(token_mask[i])
+    #     visible_idx = ~token_mask[i]
+    #     visible_padded_images.append(padded_image[visible_idx])
+    #     visible_patch_masks.append(patch_mask[visible_idx])
+    #     visible_pos_embs.append(pos_emb[visible_idx])
     
-    visible_padded_images = torch.stack(visible_padded_images)
-    visible_patch_masks = torch.stack(visible_patch_masks)
-    visible_pos_embs = torch.stack(visible_pos_embs)
+    # visible_padded_images = torch.stack(visible_padded_images)
+    # visible_patch_masks = torch.stack(visible_patch_masks)
+    # visible_pos_embs = torch.stack(visible_pos_embs)
+
+    visible_padded_images = padded_images
+    visible_patch_masks = patch_masks
+    visible_pos_embs = pos_embs
+
+    latent_len = 128
+
+    query_ids, kv_ids = precompute_image_ids(patch_ranges, latent_len, device=visible_padded_images.device)
+
+    total_kv = sum(patch_ranges)
+
+    H = 16
+    Q = latent_len * len(images)
+    KV = total_kv
+
+    print(f'query_ids: {query_ids.shape}')
+    print(f'kv_ids: {kv_ids.shape}')
+    print(f'q: {Q}, kv: {KV}, total_kv: {total_kv}')
+
+    # def rin_mask_mod(b, h, q_idx, kv_idx):
+    #     # Look up precomputed IDs
+    #     kv_idx = torch.clamp(kv_idx, 0, total_kv - 1)
+    #     return query_ids[q_idx] == kv_ids[kv_idx]
+
+    # block_masks = create_block_mask(rin_mask_mod, 1, H, Q, KV, device=visible_padded_images.device)
+
+    # print(f'block_masks: {block_masks.shape}')
 
     # print(f'visible_padded_images.shape: {visible_padded_images.shape}')
     
-    return visible_padded_images, visible_patch_masks, image_masks, labels, visible_pos_embs, nmh, nmw
+    return visible_padded_images, visible_patch_masks, image_masks, labels, visible_pos_embs, nmh, nmw, Q, KV, query_ids, kv_ids, total_kv
 
 
 class ImageNetDataModule(LightningDataModule):
@@ -253,17 +333,27 @@ class RinLightningModule(LightningModule):
         self.num_classes = rin_config["num_classes"]
         self.patch_size = rin_config["patch_size"]
     
-    def forward(self, batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw):
-        return self.diffusion_model(batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw)
+    def forward(self, batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw, block_masks):
+        return self.diffusion_model(batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw, block_masks)
     
     def training_step(self, batch, batch_idx):
         opt = self.optimizers()
         
-        batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw = batch
+        batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw, Q, KV, query_ids, kv_ids, total_kv = batch
         batch_class = torch.nn.functional.one_hot(batch_class, num_classes=self.num_classes).float()
 
+        def rin_mask_mod(b, h, q_idx, kv_idx):
+            # Look up precomputed IDs
+            kv_idx = torch.clamp(kv_idx, 0, total_kv - 1)
+            return query_ids[q_idx] == kv_ids[kv_idx]
+
+        H = 16
+
+        block_masks = create_block_mask(rin_mask_mod, 1, H, Q, KV, device=batch_img.device)
+
         opt.zero_grad()
-        loss = self(batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw)
+        print(f'batch_img: {batch_img.shape}, batch_mask: {batch_mask.shape}')
+        loss = self(batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw, block_masks)
         self.manual_backward(loss)
         opt.step()
 
