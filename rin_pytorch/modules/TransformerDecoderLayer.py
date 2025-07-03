@@ -56,15 +56,15 @@ class TransformerDecoderLayer(torch.nn.Module):
             else:
                 self.enc_ln = nn.Identity()
                 
+            # When using FlexAttention we need query/key/value to share the same embed dim.
+            # If the provided dim_x_att differs from query dim, create a projection so that
+            # key/value are mapped to query space.
+            self.kv_proj = None
             dim_x_att = dim if dim_x_att is None else dim_x_att
-            self.cross_mha = nn.MultiheadAttention(
-                embed_dim=dim,
-                num_heads=num_heads,
-                kdim=dim_x_att,
-                vdim=dim_x_att,
-                dropout=drop_att,
-                batch_first=True,
-            )
+            if dim_x_att != dim:
+                self.kv_proj = nn.Linear(dim_x_att, dim, bias=False)
+            # NOTE: we no longer rely on torch.nn.MultiheadAttention here because we call
+            # flex_attention directly in forward, so we don't instantiate cross_mha.
             
         if use_mlp:
             self.mlp = MLP(
@@ -92,10 +92,11 @@ class TransformerDecoderLayer(torch.nn.Module):
             x = x + self.dropp(x_res)
             
         if self.cross_attention:
-            print(f'x: {x.shape}, enc: {enc.shape}')
+            # print(f'x: {x.shape}, enc: {enc.shape}')
             x_ln = self.cross_ln(x)
-            # enc = self.cross_ln(enc)
             enc = self.enc_ln(enc)
+            if self.kv_proj is not None:
+                enc = self.kv_proj(enc)
             # Unsqueeze dims based on input dimensionality
             if x_ln.dim() == 2:
                 x_ln = x_ln.unsqueeze(0).unsqueeze(0)
@@ -109,7 +110,7 @@ class TransformerDecoderLayer(torch.nn.Module):
 
             # x_res, _ = self.cross_mha(query=x_ln, key=enc, value=enc, need_weights=False, attn_mask=masks)
 
-            print(f'x_ln: {x_ln.shape}, enc: {enc.shape}')
+            # print(f'x_ln: {x_ln.shape}, enc: {enc.shape}')
             x_res = flex_attention(x_ln, enc, enc, block_mask=block_masks)
             x_res = x_res.squeeze(0)
             x = x + self.dropp(x_res)

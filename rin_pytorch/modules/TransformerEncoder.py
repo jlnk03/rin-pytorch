@@ -16,6 +16,7 @@ class TransformerEncoder(torch.nn.Module):
         self_attention=True,
         use_ffn_ln=False,
         ln_scale_shift=True,
+        group_size: int | None = None,
     ):
         super().__init__()
 
@@ -31,6 +32,7 @@ class TransformerEncoder(torch.nn.Module):
                     self_attention=self_attention,
                     use_ffn_ln=use_ffn_ln,
                     ln_scale_shift=ln_scale_shift,
+                    group_size=group_size,
                 )
                 for _ in range(num_layers)
             ]

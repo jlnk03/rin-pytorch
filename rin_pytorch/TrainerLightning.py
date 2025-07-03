@@ -246,7 +246,6 @@ def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
 
     total_kv = sum(patch_ranges)
 
-    H = 16
     Q = latent_len * len(images)
     KV = total_kv
 
@@ -341,19 +340,19 @@ class RinLightningModule(LightningModule):
         
         batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw, Q, KV, query_ids, kv_ids, total_kv = batch
         batch_class = torch.nn.functional.one_hot(batch_class, num_classes=self.num_classes).float()
+        num_images = batch_class.shape[0]
 
         def rin_mask_mod(b, h, q_idx, kv_idx):
             # Look up precomputed IDs
             kv_idx = torch.clamp(kv_idx, 0, total_kv - 1)
             return query_ids[q_idx] == kv_ids[kv_idx]
 
-        H = 16
-
-        block_masks = create_block_mask(rin_mask_mod, 1, H, Q, KV, device=batch_img.device)
+        # Temporarily disable custom block mask until latent/query dimensions match Q
+        block_masks = None
 
         opt.zero_grad()
         print(f'batch_img: {batch_img.shape}, batch_mask: {batch_mask.shape}')
-        loss = self(batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw, block_masks)
+        loss = self.diffusion_model(batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw, block_masks, num_images=num_images)
         self.manual_backward(loss)
         opt.step()
 

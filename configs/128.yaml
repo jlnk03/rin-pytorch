@@ -1,7 +1,7 @@
 rin:
   num_layers: "4,4,4,4,4,4"
   latent_slots: 128
-  latent_dim: 512
+  latent_dim: 768
   latent_mlp_ratio: 4
   latent_num_heads: 16
   tape_dim: 512
@@ -39,7 +39,7 @@ diffusion:
 trainer:
   num_classes: 1000
   train_num_steps: 220000
-  train_batch_size: 4
+  train_batch_size: 128
   split_batches: true
   fp16: false
   lr_scheduler_name: "cosine"
@@ -60,7 +60,7 @@ trainer:
     iterations: 100
     method: "ddim"
   checkpoint_folder: "/dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/imagenet/"
-  run_name: "imagenet_masked_large_ps_4_30"
+  run_name: "imagenet_single_128"
   log_to_wandb: false
   log_every_n_steps: 10
 

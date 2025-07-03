@@ -61,13 +61,25 @@ class RinDiffusionModel(torch.nn.Module):
         nmh: torch.Tensor | None = None,
         nmw: torch.Tensor | None = None,
         block_masks: torch.Tensor | None = None,
+        num_images: int = 1,
         latent_prev: torch.Tensor | None = None,
         tape_prev: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # Ensure gamma is a 1-D tensor of length batch_size
         gamma = gamma.squeeze()
-        assert gamma.ndim == 1
+        if gamma.ndim == 0:
+            gamma = gamma.unsqueeze(0)  # shape (1,)
+
+        # Debug prints to help trace shape issues later on
+        if gamma.ndim != 1:
+            print(f"[DEBUG] Unexpected gamma shape after squeeze: {gamma.shape}")
+
+        # Expand gamma if necessary to match the batch dimension
+        if gamma.size(0) != x.size(0):
+            gamma = gamma.expand(x.size(0))
+
         # print(f'pos_embs_denoise: {pos_embs.shape}')
-        output, latent, tape = self.denoiser(x, gamma, masks, cond, pos_embs, nmh, nmw, block_masks, latent_prev, tape_prev)
+        output, latent, tape = self.denoiser(x, gamma, masks, cond, pos_embs, nmh, nmw, block_masks, num_images, latent_prev, tape_prev)
         return output, latent, tape
 
     @torch.no_grad()
@@ -234,18 +246,22 @@ class RinDiffusionModel(torch.nn.Module):
         nmh: torch.Tensor,
         nmw: torch.Tensor,
         block_masks: torch.Tensor,
+        num_images: int = 1,
         t: torch.Tensor | None = None,
     ):
+        # Guarantee a batch dimension. If images come as (T, D), treat it as batch size 1.
+        if images.ndim == 2:
+            images = images.unsqueeze(0)
+            masks = masks.unsqueeze(0) if masks is not None else masks
 
         images = images * 2.0 - 1.0
         images_noised, noise, _, gamma = self.scheduler.add_noise(images, t=t)
         # print(f'pos_embs_noise_denoise: {pos_embs.shape}')
         # print(f'images_noised: {images_noised.shape}')
 
-        # bsz = images.size(0)
-        bsz = 1
-        latent_prev = torch.zeros((bsz, *self.denoiser.latent_shape), device=images.device)
-        tape_prev = torch.zeros((bsz, *self.denoiser.tape_shape), device=images.device)
+        total_slots = num_images * self.denoiser.latent_shape[0]
+        latent_prev = torch.zeros((1, total_slots, self.denoiser.latent_shape[1]), device=images.device)
+        tape_prev = torch.zeros((1, *self.denoiser.tape_shape), device=images.device)
         # TODO: add self-cond with correct masking inside of one batch ie filter by index and not directly by mask
         # if self._self_cond != "none" and self._self_cond_rate > 0.0:
         #     mask = torch.rand(bsz) < self._self_cond_rate
@@ -272,13 +288,32 @@ class RinDiffusionModel(torch.nn.Module):
         #         latent_prev[mask] = latent_prev_out.detach()
         #         tape_prev[mask] = tape_prev_out.detach()
 
+        # Debug prints for tracing shapes
+        # print(f"[DEBUG] images_noised: {images_noised.shape}, masks: {masks.shape if masks is not None else None}, pos_embs: {pos_embs.shape}")
+        # print(f"[DEBUG] gamma (before denoise): {gamma.shape}")
+
         # pass masks to denoise
-        denoise_out, _, _ = self.denoise(images_noised, gamma, labels, masks, pos_embs, nmh, nmw, block_masks, latent_prev, tape_prev)
-        # print(f'denoise_out: {denoise_out.shape}')
-        # print(f'gamma: {gamma.shape}')
-        # print(f'images_noised: {images_noised.shape}')
+        denoise_out, _, _ = self.denoise(images_noised, gamma, labels, masks, pos_embs, nmh, nmw, block_masks, num_images, latent_prev, tape_prev)
+        # print(f"[DEBUG] denoise_out: {denoise_out.shape}")
+
+        # Flatten the output to 2D for direct comparison
+        denoise_out = denoise_out.reshape(-1, denoise_out.shape[-1])  # (N_pred, D)
+
+        # Flatten xt to same 2-D shape
+        xt_flat = images_noised.reshape(-1, images_noised.shape[-1])  # (N_tokens, D)
+
+        # Take the prefix that matches the number of predictions. This matches how Rin.readout_tape
+        # keeps only the first (nmh*nmw) tokens.
+        if denoise_out.size(0) > xt_flat.size(0):
+            raise RuntimeError(
+                f"Predicted {denoise_out.size(0)} tokens but only have {xt_flat.size(0)} input tokens")
+        xt_aligned = xt_flat[: denoise_out.size(0)]
+
+        # Reduce gamma to scalar for broadcasting
+        gamma_scalar = gamma.reshape(-1)[0]
+
         pred_dict = diffusion_utils.get_x0_eps(
-            images_noised, gamma, denoise_out, self._pred_type, truncate_noise=False, clip_x0=True
+            xt_aligned, gamma_scalar, denoise_out, self._pred_type, truncate_noise=False, clip_x0=True
         )
         return images, noise, images_noised, pred_dict
 
@@ -306,6 +341,7 @@ class RinDiffusionModel(torch.nn.Module):
         nmh: torch.Tensor,
         nmw: torch.Tensor,
         block_masks: torch.Tensor,
+        num_images: int = 1,
         t: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # print(f'pos_embs_fwd_diff: {pos_embs.shape}')
@@ -314,7 +350,7 @@ class RinDiffusionModel(torch.nn.Module):
         # print(f'images_init: {images.shape}')
         # print(f'masks: {masks.shape}')
         # print(f'image_masks: {image_mask.shape}')
-        images, noise, _, pred_dict = self.noise_denoise(images, masks, labels, pos_embs, nmh, nmw, block_masks, t=t)
+        images, noise, _, pred_dict = self.noise_denoise(images, masks, labels, pos_embs, nmh, nmw, block_masks, num_images=num_images, t=t)
         # print(f'images: {images.shape}')
         # print(f'noise: {noise.shape}')
         # print(f'pred_noise: {pred_dict["noise_pred"].shape}')
@@ -324,9 +360,9 @@ class RinDiffusionModel(torch.nn.Module):
         # print(f'image_mask: {image_mask.shape}')
         # print(f'masks: {masks.shape}')
         # print(f'images: {images.shape}')
-        images = images[masks]
-        noise = noise[masks]
-        pred_dict["noise_pred"] = pred_dict["noise_pred"][masks]
-        pred_dict["data_pred"] = pred_dict["data_pred"][masks]
+        # Align ground-truth and noise tensors to the number of tokens predicted
+        pred_len = pred_dict["data_pred"].shape[0]
+        images = images.reshape(-1, images.shape[-1])[:pred_len]
+        noise = noise.reshape(-1, noise.shape[-1])[:pred_len]
         loss = self.compute_loss(images, noise, pred_dict)
         return loss

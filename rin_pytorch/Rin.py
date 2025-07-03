@@ -191,6 +191,7 @@ class Rin(torch.nn.Module):
                         drop_path=drop_path,
                         drop_units=drop_units,
                         drop_att=drop_att,
+                        group_size=self._latent_slots,
                     )
                 )
 
@@ -286,9 +287,13 @@ class Rin(torch.nn.Module):
             t = self.time_emb(t, last_swish=False, normalize=True)
             t = rearrange(t, "b d -> b 1 d")
         if cond is not None:
-            cond = self.cond_proj(cond)
+            cond = self.cond_proj(cond)  # shape (N, D) or (1, D)
             if cond.ndim == 2:
-                cond = rearrange(cond, "b d -> b 1 d")
+                # If physical batch is 1 we treat the rows as token dimension
+                if t is not None and t.shape[0] == 1:
+                    cond = cond.unsqueeze(0)  # -> (1, N, D)
+                else:
+                    cond = rearrange(cond, "b d -> b 1 d")
         return t, cond
 
     def initialize_tape(
@@ -323,26 +328,28 @@ class Rin(torch.nn.Module):
 
     def initialize_latent(
         self,
-        batch_size: int,
+        num_images: int,
         time_emb: torch.Tensor | None,
         cond: torch.Tensor | None,
         latent_prev: torch.Tensor | None,
     ) -> torch.Tensor:
-        batch_size = 4
-        latent = self.latent_pos_emb
+        """Create latent tokens so that every logical image gets its own latent slot group.
+
+        We keep the physical batch dimension at 1 (because all tokens are concatenated),
+        but replicate the learned positional embeddings `num_images` times so that
+        total query length = num_images * latent_slots.
+        """
+
+        # Base positional embedding (S, D)
+        latent_base = self.latent_pos_emb
+
         if self._latent_pos_encoding in ["sin_cos_plus_learned"]:
-            latent = latent + self.latent_pos_emb_res
-        print(f'latent 1: {latent.shape}')
-        latent = latent.repeat(batch_size, 1)
-        print(f'latent 2: {latent.shape}')
-        # if self._time_on_latent and time_emb is not None:
-        #     latent = _concat_tokens(latent, time_emb)
-        # TODO: add cond and latent_prev
-        # if self._cond_on_latent and cond is not None:
-        #     latent = _concat_tokens(latent, cond)
-        # if self._self_cond in ["latent", "latent+tape"] and latent_prev is not None:
-        #     latent = latent + \
-        #         self.latent_prev_ln(self.latent_prev_proj(latent_prev))
+            latent_base = latent_base + self.latent_pos_emb_res
+
+        # Repeat for every image then merge into one big sequence; keep batch dim = 1
+        latent = latent_base.unsqueeze(0).repeat(num_images, 1, 1)  # (num_images, S, D)
+        latent = latent.reshape(1, num_images * self._latent_slots, self._latent_dim)
+
         return latent
 
     def compute(
@@ -440,6 +447,7 @@ class Rin(torch.nn.Module):
         nmh: torch.Tensor | None = None,
         nmw: torch.Tensor | None = None,
         block_masks: torch.Tensor | None = None,
+        num_images: int = 1,
         latent_prev: torch.Tensor | None = None,
         tape_prev: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -461,7 +469,7 @@ class Rin(torch.nn.Module):
         time_emb, cond = self.initialize_cond(t, cond)
         tape, tape_r = self.initialize_tape(
             x, masks, time_emb, cond, pos_embs, nmh, nmw, tape_prev)
-        latent = self.initialize_latent(bs, time_emb, cond, latent_prev)
+        latent = self.initialize_latent(num_images, time_emb, cond, latent_prev)
         latent, tape = self.compute(latent, tape, tape_r, masks, block_masks)
         x = self.readout_tape(tape, nmh, nmw)
         return x, latent, tape[:, : self._tape_slots]
