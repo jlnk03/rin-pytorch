@@ -1,8 +1,9 @@
-import torch
-import torch.nn as nn
+import torch  # type: ignore
+import torch.nn as nn  # type: ignore
 
 from .DropPath import DropPath
 from .MLP import MLP
+from .FlexMultiheadAttention import FlexMultiheadAttention
 
 
 class TransformerEncoderLayer(torch.nn.Module):
@@ -23,11 +24,11 @@ class TransformerEncoderLayer(torch.nn.Module):
         self.self_attention = self_attention
         if self_attention:
             self.mha_ln = nn.LayerNorm(dim, eps=1e-6, elementwise_affine=ln_scale_shift)
-            self.mha = nn.MultiheadAttention(
+            self.mha = FlexMultiheadAttention(
                 dim,
                 num_heads,
                 dropout=drop_att,
-                batch_first=True
+                batch_first=True,
             )
 
         self.mlp = MLP(

@@ -7,6 +7,7 @@ from .TransformerDecoder import TransformerDecoder
 from .TransformerDecoderLayer import TransformerDecoderLayer
 from .TransformerEncoder import TransformerEncoder
 from .TransformerEncoderLayer import TransformerEncoderLayer
+from .FlexMultiheadAttention import FlexMultiheadAttention
 
 __all__ = [
     "DropPath",
@@ -18,4 +19,5 @@ __all__ = [
     "TransformerDecoderLayer",
     "TransformerEncoder",
     "TransformerEncoderLayer",
+    "FlexMultiheadAttention",
 ]
