@@ -64,12 +64,12 @@ def main():
         logger=wandb_logger,
         callbacks=[checkpoint_callback, lr_monitor],
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
-        num_nodes= 1,
-        devices=1,
+        num_nodes= 2,
+        devices=2,
         precision="bf16" if config["trainer"]["fp16"] else "32",
         gradient_clip_val=config["trainer"]["clip_grad_norm"],
         strategy='ddp_find_unused_parameters_true' if torch.cuda.device_count() > 1 else "auto",
-        log_every_n_steps=config["trainer"]["log_every_n_steps"]
+        log_every_n_steps=config["trainer"]["log_every_n_steps"],
     )
     
     # Pass the resume checkpoint path to trainer.fit() to resume from a given checkpoint

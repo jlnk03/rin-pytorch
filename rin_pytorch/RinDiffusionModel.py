@@ -140,12 +140,10 @@ class RinDiffusionModel(torch.nn.Module):
         else:
             cond = None
 
-        # Prepare shape of initial noise
-        samples_shape = [num_samples, *image_shape]  # (B, C, H, W)
+        # Create initial noise per sample (standard batch mode)
+        samples_shape = [num_samples, *image_shape]  # (B , C , H , W)
         samples = self.scheduler.sample_noise(samples_shape, device=device, seed=seed)
-        samples = patchify(samples, patch_size)
-        # samples = rearrange(samples, "b c h w -> b (h w) c", h=image_shape[1], w=image_shape[2])
-        # print(f'samples_init: {samples.shape}')
+        samples = patchify(samples, patch_size)  # (B , T , D)
 
         # If no mask is provided, default to an all-ones mask in the *image* resolution.
         if mask is None:
@@ -158,15 +156,14 @@ class RinDiffusionModel(torch.nn.Module):
         if mask.ndim == 4 and mask.shape[1] == 1:
             mask = mask.squeeze(1)
 
-        # Downsample the mask from (H, W) to (H//patch_size, W//patch_size) if needed
-        # mask_out -> (B, H//patch_size, W//patch_size)
-        mask_out = downsample_mask(mask, patch_size)  # [b, h//p, w//p]
-        # re-shape from (B, H//patch_size, W//patch_size) -> (B, H//patch_size * W//patch_size)
-        mask_out = rearrange(mask_out, "b h w -> b (h w)").bool()
+        # Downsample the mask per sample to patch resolution
+        mask_out = downsample_mask(mask, patch_size)  # (B , H/p , W/p)
+        mask_out = rearrange(mask_out, "b h w -> b (h w)").bool()  # (B , T)
 
         height = mask.shape[1] // patch_size
         width = mask.shape[2] // patch_size
-        pos_embs = create_2d_sin_cos_pos_emb(height, width, tape_dim)
+        # Positional embedding for one image is reused; broadcasting over batch works automatically
+        pos_embs = create_2d_sin_cos_pos_emb(height, width, tape_dim)  # (T , D)
 
         # Prepare schedule transforms
         if self._inference_schedule is None:
@@ -177,13 +174,8 @@ class RinDiffusionModel(torch.nn.Module):
             )
 
         # Helper to get the (1 - t/iterations) step
-        def get_step(t):
-            return torch.full(
-                # [num_samples, 1, 1, 1],
-                [num_samples, 1, 1],
-                1.0 - t / iterations,
-                device=device,
-            )
+        def get_step(t_step):
+            return torch.full([num_samples, 1, 1], 1.0 - t_step / iterations, device=device)
 
         data_pred = torch.zeros_like(samples, device=device)
         latent_prev = None
@@ -212,7 +204,7 @@ class RinDiffusionModel(torch.nn.Module):
                 nmh,
                 nmw,
                 block_masks=None,
-                num_images=samples.shape[0],
+                num_images=1,
                 latent_prev=latent_prev,
                 tape_prev=tape_prev,
             )
@@ -240,11 +232,12 @@ class RinDiffusionModel(torch.nn.Module):
 
             # print(f'samples_t: {samples.shape}')
 
-        # Map final samples from [-1, 1] into [0, 1], clamp, and return
+        # Map final samples from [-1,1] to [0,1]
         samples = data_pred * 0.5 + 0.5
         samples.clamp_(0.0, 1.0)
 
-        # samples = rearrange(samples, "b (h w) (c p1 p2) -> b c (h p1) (w p2)", h=image_shape[1]//patch_size, w=image_shape[2]//patch_size, p1=patch_size, p2=patch_size)
+        # Unpack tokens → (N , T , D)
+        samples = samples.reshape(num_samples, nmh * nmw, -1)
         samples = unpatchify(samples, nmh, nmw, patch_size, image_shape[0])
         return samples
 

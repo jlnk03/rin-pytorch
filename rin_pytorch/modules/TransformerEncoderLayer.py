@@ -68,7 +68,7 @@ class TransformerEncoderLayer(torch.nn.Module):
 
             # flex_attention expects (B, H, Q, D_head). Use H=1 for now.
             q = x_ln.unsqueeze(1)  # (B,1,Q,D)
-            print(f'q: {q.shape}')
+            # print(f'q: {q.shape}')
             x_residual = flex_attention(q, q, q, block_mask=block_mask)
             x_residual = x_residual.squeeze(1)  # back to (B,Q,D)
             x = x + self.dropp(x_residual)

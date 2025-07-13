@@ -4,9 +4,9 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --clusters=hpda2
 #SBATCH --partition=hpda2_compute_gpu
-#SBATCH --nodes=4
-#SBATCH --ntasks-per-node=4
-#SBATCH --gres=gpu:4
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=2
+#SBATCH --gres=gpu:2
 #SBATCH --mem=256G
 #SBATCH --time=6-00:00:00
 

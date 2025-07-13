@@ -249,9 +249,9 @@ def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
     Q = latent_len * len(images)
     KV = total_kv
 
-    print(f'query_ids: {query_ids.shape}')
-    print(f'kv_ids: {kv_ids.shape}')
-    print(f'q: {Q}, kv: {KV}, total_kv: {total_kv}')
+    # print(f'query_ids: {query_ids.shape}')
+    # print(f'kv_ids: {kv_ids.shape}')
+    # print(f'q: {Q}, kv: {KV}, total_kv: {total_kv}')
 
     # def rin_mask_mod(b, h, q_idx, kv_idx):
     #     # Look up precomputed IDs
