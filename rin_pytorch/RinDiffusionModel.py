@@ -201,9 +201,20 @@ class RinDiffusionModel(torch.nn.Module):
             # gamma = gamma.squeeze(-1)
             # gamma_prev = gamma_prev.squeeze(-1)
 
-            # Denoise with current samples
+            # Denoise with current samples.  `num_images` equals the physical batch size
+            # (one logical image per batch element in the sampling path).
             pred_out, latent_prev, tape_prev = self.denoise(
-                samples, gamma, cond, mask_out, pos_embs, nmh, nmw, latent_prev, tape_prev
+                samples,
+                gamma,
+                cond,
+                mask_out,
+                pos_embs,
+                nmh,
+                nmw,
+                block_masks=None,
+                num_images=samples.shape[0],
+                latent_prev=latent_prev,
+                tape_prev=tape_prev,
             )
 
             # Convert model output to x0 and eps

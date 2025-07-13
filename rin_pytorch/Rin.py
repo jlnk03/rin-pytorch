@@ -333,22 +333,67 @@ class Rin(torch.nn.Module):
         cond: torch.Tensor | None,
         latent_prev: torch.Tensor | None,
     ) -> torch.Tensor:
-        """Create latent tokens so that every logical image gets its own latent slot group.
+        """Create the latent query sequence when *num_images* logical images are packed
+        into a single physical batch (batch dimension = 1).
 
-        We keep the physical batch dimension at 1 (because all tokens are concatenated),
-        but replicate the learned positional embeddings `num_images` times so that
-        total query length = num_images * latent_slots.
+        Steps:
+        1.  Replicate the learned positional slots so that every image owns its own
+            block of `self._latent_slots` tokens.
+        2.  Optionally append a time-embedding token (if *time_on_latent* is enabled).
+        3.  Optionally append one label token per image when *cond_on_latent* is enabled.
+        4.  Add self-conditioning residual if supplied.
         """
 
-        # Base positional embedding (S, D)
+        # ------------------------------------------------------------------
+        # 1. Positional slots – (1 , num_images*self._latent_slots , D)
+        # ------------------------------------------------------------------
         latent_base = self.latent_pos_emb
-
         if self._latent_pos_encoding in ["sin_cos_plus_learned"]:
             latent_base = latent_base + self.latent_pos_emb_res
 
-        # Repeat for every image then merge into one big sequence; keep batch dim = 1
-        latent = latent_base.unsqueeze(0).repeat(num_images, 1, 1)  # (num_images, S, D)
-        latent = latent.reshape(1, num_images * self._latent_slots, self._latent_dim)
+        latent = (
+            latent_base.unsqueeze(0)  # (1 , S , D)
+            .repeat(num_images, 1, 1)  # (num_images , S , D)
+            .reshape(1, num_images * self._latent_slots, self._latent_dim)
+        )
+
+        # ------------------------------------------------------------------
+        # 2. Append time token(s) if required
+        #    • time_emb is either (B , 1 , D)  (normal batch)
+        #      or            (K , 1 , D)  (packed K images)
+        # ------------------------------------------------------------------
+        if self._time_on_latent and time_emb is not None:
+            if time_emb.dim() == 3 and time_emb.shape[0] > 1:
+                # Packed sequence case: (K , 1 , D)  →  (1 , K , D)
+                time_emb_tok = time_emb.permute(1, 0, 2)
+            else:
+                time_emb_tok = time_emb  # already (B , 1 , D) or (1 , 1 , D)
+            latent = _concat_tokens(latent, time_emb_tok)
+
+        # ------------------------------------------------------------------
+        # 3. Append class label token(s) when conditioning on latent
+        # ------------------------------------------------------------------
+        if self._cond_on_latent and cond is not None:
+            # Ensure cond has leading batch dim = 1 so that it can be concatenated
+            if cond.dim() == 3 and cond.shape[0] > 1:
+                # (B , 1 , D)  →  (1 , B , D)
+                cond_tok = cond.permute(1, 0, 2)
+            else:
+                cond_tok = cond
+            latent = _concat_tokens(latent, cond_tok)
+
+        # ------------------------------------------------------------------
+        # 4. Add self-conditioning residual if supplied
+        # ------------------------------------------------------------------
+        if self._self_cond in ["latent", "latent+tape"] and latent_prev is not None:
+            res = self.latent_prev_ln(self.latent_prev_proj(latent_prev))
+            # Make sure sequence dimension matches (may differ when extra time/cond tokens present)
+            if res.shape[1] < latent.shape[1]:
+                pad_len = latent.shape[1] - res.shape[1]
+                res = F.pad(res, (0, 0, 0, pad_len))  # pad seq length with zeros
+            elif res.shape[1] > latent.shape[1]:
+                res = res[:, : latent.shape[1], :]
+            latent = latent + res
 
         return latent
 

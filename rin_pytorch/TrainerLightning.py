@@ -339,8 +339,15 @@ class RinLightningModule(LightningModule):
         opt = self.optimizers()
         
         batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw, Q, KV, query_ids, kv_ids, total_kv = batch
+
+        # One-hot encode and reshape so that shape becomes (1, K, num_classes)
         batch_class = torch.nn.functional.one_hot(batch_class, num_classes=self.num_classes).float()
+
+        # Number of logical images before the extra batch dimension is added
         num_images = batch_class.shape[0]
+
+        # Packed-sequence variant: treat rows as tokens by adding a dummy batch dim
+        batch_class = batch_class.unsqueeze(0)  # → (1, K, C)
 
         def rin_mask_mod(b, h, q_idx, kv_idx):
             # Look up precomputed IDs
@@ -352,7 +359,17 @@ class RinLightningModule(LightningModule):
 
         opt.zero_grad()
         print(f'batch_img: {batch_img.shape}, batch_mask: {batch_mask.shape}')
-        loss = self.diffusion_model(batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw, block_masks, num_images=num_images)
+        loss = self.diffusion_model(
+            batch_img,
+            batch_mask,
+            image_mask,
+            batch_class,
+            pos_embs,
+            nmh,
+            nmw,
+            block_masks,
+            num_images=num_images,
+        )
         self.manual_backward(loss)
         opt.step()
 

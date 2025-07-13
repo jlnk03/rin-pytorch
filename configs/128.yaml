@@ -39,7 +39,7 @@ diffusion:
 trainer:
   num_classes: 1000
   train_num_steps: 220000
-  train_batch_size: 128
+  train_batch_size: 32
   split_batches: true
   fp16: false
   lr_scheduler_name: "cosine"
@@ -60,8 +60,8 @@ trainer:
     iterations: 100
     method: "ddim"
   checkpoint_folder: "/dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/imagenet/"
-  run_name: "imagenet_single_128"
-  log_to_wandb: false
+  run_name: "imagenet_single_128_32"
+  log_to_wandb: true
   log_every_n_steps: 10
 
 run:

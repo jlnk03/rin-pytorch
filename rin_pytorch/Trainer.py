@@ -252,11 +252,25 @@ class Trainer:
         ) as pbar:
             while self.step < self.train_num_steps:
                 batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw = next(self.dl)
+
+                # One-hot encode labels and add dummy batch dimension so that shape is (1, K, C)
                 batch_class = torch.nn.functional.one_hot(batch_class, num_classes=self.num_classes).float()
+                num_images = batch_class.shape[0]
+                batch_class = batch_class.unsqueeze(0)
 
                 self.optimizer.zero_grad()
 
-                loss = self.diffusion_model(batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw)
+                loss = self.diffusion_model(
+                    batch_img,
+                    batch_mask,
+                    image_mask,
+                    batch_class,
+                    pos_embs,
+                    nmh,
+                    nmw,
+                    block_masks=None,
+                    num_images=num_images,
+                )
 
                 self.accelerator.backward(loss)
 
