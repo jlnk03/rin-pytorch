@@ -36,5 +36,6 @@ class TransformerEncoder(torch.nn.Module):
             ]
         )
 
-    def forward(self, x):
-        return self.enc_layers(x)
+    def forward(self, x, latent_document_ids):
+        result = self.enc_layers((x, latent_document_ids))
+        return result[0]

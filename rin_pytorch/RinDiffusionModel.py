@@ -6,6 +6,7 @@ from .utils import diffusion_utils
 from einops import rearrange
 from .utils.mask import downsample_mask
 from .utils.pos_embedding import create_2d_sin_cos_pos_emb
+from .utils.ragged_tensor import ragged_list_to_tensor, get_document_ids
 from torch.nn.functional import pad
 
 def patchify(x: torch.Tensor, p: int) -> torch.Tensor:
@@ -53,20 +54,22 @@ class RinDiffusionModel(torch.nn.Module):
 
     def denoise(
         self,
-        x: torch.Tensor,
-        gamma: torch.Tensor,
-        cond: torch.Tensor | None,
-        masks: torch.Tensor | None = None,
-        pos_embs: torch.Tensor | None = None,
-        nmh: torch.Tensor | None = None,
-        nmw: torch.Tensor | None = None,
-        latent_prev: torch.Tensor | None = None,
-        tape_prev: torch.Tensor | None = None,
+        # x: torch.Tensor,
+        # gamma: torch.Tensor,
+        # cond: torch.Tensor | None,
+        # masks: torch.Tensor | None = None,
+        # pos_embs: torch.Tensor | None = None,
+        # nmh: torch.Tensor | None = None,
+        # nmw: torch.Tensor | None = None,
+        # latent_prev: torch.Tensor | None = None,
+        # tape_prev: torch.Tensor | None = None,
+        x, gamma, cond, pos_embs, offsets, offsets_pos_embs, document_ids,
+        latent_prev, tape_prev,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         gamma = gamma.squeeze()
         assert gamma.ndim == 1
         # print(f'pos_embs_denoise: {pos_embs.shape}')
-        output, latent, tape = self.denoiser(x, gamma, masks, cond, pos_embs, nmh, nmw, latent_prev, tape_prev)
+        output, latent, tape = self.denoiser(x, gamma, cond, pos_embs, offsets, offsets_pos_embs, document_ids, latent_prev, tape_prev)
         return output, latent, tape
 
     @torch.no_grad()
@@ -78,7 +81,6 @@ class RinDiffusionModel(torch.nn.Module):
         method: str = "ddim",
         seed: int | None = None,
         class_override: int | None = None,
-        mask: torch.Tensor | None = None,
         image_height: int = 32,
         image_width: int = 32,
     ):
@@ -87,13 +89,13 @@ class RinDiffusionModel(torch.nn.Module):
 
         Args:
             num_samples: Number of samples to generate.
+            tape_dim: Dimension of the tape embeddings.
             iterations: Number of sampling steps (diffusion timesteps).
             method: Sampler name (e.g. "ddim", "ddpm", etc.).
             seed: Optional random seed for reproducible sampling.
             class_override: If set, use this single class for all samples.
-            mask: Optionally supply a float/binary mask of shape:
-                  (num_samples, image_height, image_width) or (num_samples, 1, image_height, image_width).
-                  If None, a default mask of all 1s is used.
+            image_height: Height of the generated images.
+            image_width: Width of the generated images.
 
         Returns:
             (samples) Generated images in [0, 1].
@@ -130,30 +132,35 @@ class RinDiffusionModel(torch.nn.Module):
         # Prepare shape of initial noise
         samples_shape = [num_samples, *image_shape]  # (B, C, H, W)
         samples = self.scheduler.sample_noise(samples_shape, device=device, seed=seed)
-        samples = patchify(samples, patch_size)
-        # samples = rearrange(samples, "b c h w -> b (h w) c", h=image_shape[1], w=image_shape[2])
-        # print(f'samples_init: {samples.shape}')
+        samples = patchify(samples, patch_size)  # [num_samples, num_patches, patch_dim]
+        
+        # Store original batch dimensions for reshaping later
+        batch_size, num_patches, patch_dim = samples.shape
+        
+        # Convert to ragged tensor format - flatten all samples
+        samples_list = [samples[i] for i in range(num_samples)]  # List of [num_patches, patch_dim] tensors
+        samples_flat, offsets = ragged_list_to_tensor(samples_list)  # [total_patches, patch_dim]
+        offsets = offsets.to(device)  # Move offsets to the same device as samples
+        offsets_pos_embs = offsets.clone()  # Same offsets for positional embeddings
+        
+        # Create document IDs
+        document_ids = get_document_ids(offsets)  # Now this will be on the correct device
+        
+        # Create positional embeddings for all patches (repeated for each sample)
+        height = image_height // patch_size
+        width = image_width // patch_size
+        single_pos_emb = create_2d_sin_cos_pos_emb(height, width, tape_dim)
+        pos_embs_list = [single_pos_emb for _ in range(num_samples)]
+        pos_embs_flat, _ = ragged_list_to_tensor(pos_embs_list)  # [total_patches, tape_dim]
+        pos_embs_flat = pos_embs_flat.to(device)  # Also ensure pos_embs are on correct device
 
-        # If no mask is provided, default to an all-ones mask in the *image* resolution.
-        if mask is None:
-            mask = torch.ones(
-                (num_samples, image_shape[1], image_shape[2]),
-                dtype=torch.float,
-                device=device,
-            )
-        # If mask has shape (B, 1, H, W), reduce it to (B, H, W) for convenience
-        if mask.ndim == 4 and mask.shape[1] == 1:
-            mask = mask.squeeze(1)
-
-        # Downsample the mask from (H, W) to (H//patch_size, W//patch_size) if needed
-        # mask_out -> (B, H//patch_size, W//patch_size)
-        mask_out = downsample_mask(mask, patch_size)  # [b, h//p, w//p]
-        # re-shape from (B, H//patch_size, W//patch_size) -> (B, H//patch_size * W//patch_size)
-        mask_out = rearrange(mask_out, "b h w -> b (h w)").bool()
-
-        height = mask.shape[1] // patch_size
-        width = mask.shape[2] // patch_size
-        pos_embs = create_2d_sin_cos_pos_emb(height, width, tape_dim)
+        # print(f'samples_flat: {samples_flat.shape}')
+        # print(f'pos_embs_flat: {pos_embs_flat.shape}')
+        # print(f'offsets: {offsets.shape}')
+        # print(f'offsets_pos_embs: {offsets_pos_embs.shape}')
+        # print(f'document_ids: {document_ids.shape}')
+        
+        # Note: Mask functionality removed since all samples have the same shape
 
         # Prepare schedule transforms
         if self._inference_schedule is None:
@@ -166,13 +173,12 @@ class RinDiffusionModel(torch.nn.Module):
         # Helper to get the (1 - t/iterations) step
         def get_step(t):
             return torch.full(
-                # [num_samples, 1, 1, 1],
-                [num_samples, 1, 1],
+                [num_samples],  # Still using original num_samples for batch dimension
                 1.0 - t / iterations,
                 device=device,
             )
 
-        data_pred = torch.zeros_like(samples, device=device)
+        data_pred = torch.zeros_like(samples_flat, device=device)
         latent_prev = None
         tape_prev = None
 
@@ -184,18 +190,27 @@ class RinDiffusionModel(torch.nn.Module):
             time_step = get_step(t)
             time_step_p = torch.max(get_step(t + 1), torch.tensor(0.0, device=device))
             gamma, gamma_prev = time_transform(time_step), time_transform(time_step_p)
-            # Drop last dimension of gamma and gamma_prev
-            # gamma = gamma.squeeze(-1)
-            # gamma_prev = gamma_prev.squeeze(-1)
+            # Calculate the correct expansion ratio from actual tensor sizes
+            patches_per_sample = samples_flat.shape[0] // num_samples
+            gamma = torch.repeat_interleave(gamma, patches_per_sample, dim=0)
+            gamma_prev = torch.repeat_interleave(gamma_prev, patches_per_sample, dim=0)
 
-            # Denoise with current samples
+            # Add extra dimension for proper broadcasting with [N, D] tensors
+            gamma = gamma.unsqueeze(-1)  # [16384] -> [16384, 1]
+            gamma_prev = gamma_prev.unsqueeze(-1)  # [16384] -> [16384, 1]
+
+            # Denoise with current samples using new signature
             pred_out, latent_prev, tape_prev = self.denoise(
-                samples, gamma, cond, mask_out, pos_embs, nmh, nmw, latent_prev, tape_prev
+                samples_flat, gamma, cond, pos_embs_flat, offsets, offsets_pos_embs, document_ids, latent_prev, tape_prev
             )
+
+            # print(f'pred_out: {pred_out.shape}')
+            # print(f'samples_flat: {samples_flat.shape}')
+            # print(f'gamma: {gamma.shape}')
 
             # Convert model output to x0 and eps
             x0_eps = diffusion_utils.get_x0_eps(
-                samples,
+                samples_flat,
                 gamma,
                 pred_out,
                 self._pred_type,
@@ -205,8 +220,8 @@ class RinDiffusionModel(torch.nn.Module):
             noise_pred, data_pred = x0_eps["noise_pred"], x0_eps["data_pred"]
 
             # Take one sampling step
-            samples = self.scheduler.transition_step(
-                samples=samples,
+            samples_flat = self.scheduler.transition_step(
+                samples=samples_flat,
                 data_pred=data_pred,
                 noise_pred=noise_pred,
                 gamma_now=gamma,
@@ -217,21 +232,25 @@ class RinDiffusionModel(torch.nn.Module):
             # print(f'samples_t: {samples.shape}')
 
         # Map final samples from [-1, 1] into [0, 1], clamp, and return
-        samples = data_pred * 0.5 + 0.5
-        samples.clamp_(0.0, 1.0)
+        samples_final = data_pred * 0.5 + 0.5
+        samples_final.clamp_(0.0, 1.0)
 
-        # samples = rearrange(samples, "b (h w) (c p1 p2) -> b c (h p1) (w p2)", h=image_shape[1]//patch_size, w=image_shape[2]//patch_size, p1=patch_size, p2=patch_size)
-        samples = unpatchify(samples, nmh, nmw, patch_size, image_shape[0])
+        # Reshape back to batch format: [total_patches, patch_dim] -> [num_samples, num_patches, patch_dim]
+        samples_final = samples_final.view(num_samples, num_patches, patch_dim)
+
+        samples = unpatchify(samples_final, nmh, nmw, patch_size, image_shape[0])
         return samples
 
     def noise_denoise(
         self,
-        images: torch.Tensor,
-        masks: torch.Tensor,
-        labels: torch.Tensor,
-        pos_embs: torch.Tensor,
-        nmh: torch.Tensor,
-        nmw: torch.Tensor,
+        # images: torch.Tensor,
+        # masks: torch.Tensor,
+        # labels: torch.Tensor,
+        # pos_embs: torch.Tensor,
+        # nmh: torch.Tensor,
+        # nmw: torch.Tensor,
+        # t: torch.Tensor | None = None,
+        images, pos_embs, labels, offsets, offsets_pos_embs, document_ids,
         t: torch.Tensor | None = None,
     ):
 
@@ -240,35 +259,63 @@ class RinDiffusionModel(torch.nn.Module):
         # print(f'pos_embs_noise_denoise: {pos_embs.shape}')
         # print(f'images_noised: {images_noised.shape}')
 
-        bsz = images.size(0)
-        latent_prev = torch.zeros((bsz, *self.denoiser.latent_shape), device=images.device)
-        tape_prev = torch.zeros((bsz, *self.denoiser.tape_shape), device=images.device)
-        if self._self_cond != "none" and self._self_cond_rate > 0.0:
-            mask = torch.rand(bsz) < self._self_cond_rate
+        # bsz = images.size(0)
+        bsz = labels.shape[0]
+        # latent_prev = torch.zeros((bsz, *self.denoiser.latent_shape), device=images.device)
+        # tape_prev = torch.zeros((bsz, *self.denoiser.tape_shape), device=images.device)
+        # latent_prev = torch.zeros((bsz, *self.denoiser.latent_shape), device=images.device)
+        tape_length = images_noised.shape[0]
+        tape_prev = torch.zeros((tape_length, self.denoiser.tape_dim), device=images.device)
+        latent_length = bsz * self.denoiser._latent_slots
+        latent_prev = torch.zeros((latent_length, self.denoiser.latent_dim), device=images.device)
 
-            if torch.any(mask):
-                # print(f'mask: {mask}')
-                # print(f'mask shape: {mask.shape}')
-                # print(f'tape_prev shape: {tape_prev.shape}')
+        if self._self_cond != "none" and self._self_cond_rate > 0.0:
+            print(f'self_cond: {self._self_cond}')
+            # Create document-level mask
+            doc_mask = torch.rand(bsz, device=images.device) < self._self_cond_rate
+
+            if torch.any(doc_mask):
+                # For simplicity, process all data but only update the masked documents
+                # This avoids the complexity of recomputing offsets for subsets
+
+                # Expand document-level mask to patch-level and latent-level masks
+                patch_mask = doc_mask[document_ids]  # [total_patches]
+                latent_mask = torch.repeat_interleave(doc_mask, self.denoiser._latent_slots)  # [bsz * latent_slots]
+                # print(f'latent_mask: {latent_mask.shape}')
+                # print(f'patch_mask: {patch_mask.shape}')
+
+                # print(f'images_noised: {images_noised.shape}')
+                # print(f'images noised mask: {images_noised[patch_mask].shape}')
+                # print(f'latent masked: {latent_prev[latent_mask].shape}')
+                
                 with torch.no_grad():
                     _, latent_prev_out, tape_prev_out = self.denoise(
-                        x=images_noised[mask],
-                        gamma=gamma[mask],
-                        cond=labels[mask],
-                        masks=masks[mask],
-                        pos_embs=pos_embs[mask],
-                        nmh=nmh,
-                        nmw=nmw,
+                        # x=images_noised[mask],
+                        # gamma=gamma[mask],
+                        # cond=labels[mask],
+                        # masks=masks[mask],
+                        # pos_embs=pos_embs[mask],
+                        # nmh=nmh,
+                        # nmw=nmw,
+                        images_noised[patch_mask],
+                        gamma[patch_mask],
+                        labels[doc_mask],
+                        pos_embs[patch_mask],
+                        offsets,
+                        offsets_pos_embs,
+                        document_ids[patch_mask],
+                        latent_prev[latent_mask],
+                        tape_prev[patch_mask]
                     )
 
-                # print(f'latent_prev_out: {latent_prev_out.shape}')
-                # print(f'tape_prev_out: {tape_prev_out.shape}')
-
-                latent_prev[mask] = latent_prev_out.detach()
-                tape_prev[mask] = tape_prev_out.detach()
+                # Update only the selected documents
+                latent_prev[latent_mask] = latent_prev_out.detach()
+                tape_prev[patch_mask] = tape_prev_out.detach()
+                print(f'latent_prev: {latent_prev.shape}')
 
         # pass masks to denoise
-        denoise_out, _, _ = self.denoise(images_noised, gamma, labels, masks, pos_embs, nmh, nmw, latent_prev, tape_prev)
+        denoise_out, _, _ = self.denoise(images_noised, gamma, labels, pos_embs, offsets, offsets_pos_embs, document_ids, latent_prev, tape_prev)
+        print(f'denoise_out: {denoise_out.shape}')
         # print(f'denoise_out: {denoise_out.shape}')
         # print(f'gamma: {gamma.shape}')
         # print(f'images_noised: {images_noised.shape}')
@@ -293,14 +340,15 @@ class RinDiffusionModel(torch.nn.Module):
 
     def forward(
         self,
-        images: torch.Tensor,
-        masks: torch.Tensor,
-        image_mask: torch.Tensor,
-        labels: torch.Tensor,
-        pos_embs: torch.Tensor,
-        nmh: torch.Tensor,
-        nmw: torch.Tensor,
-        t: torch.Tensor | None = None,
+        # images: torch.Tensor,
+        # masks: torch.Tensor,
+        # image_mask: torch.Tensor,
+        # labels: torch.Tensor,
+        # pos_embs: torch.Tensor,
+        # nmh: torch.Tensor,
+        # nmw: torch.Tensor,
+        # t: torch.Tensor | None = None,
+        images, pos_embs, labels, offsets, offsets_pos_embs, document_ids
     ) -> torch.Tensor:
         # print(f'pos_embs_fwd_diff: {pos_embs.shape}')
         # print(f'nmh: {nmh}')
@@ -308,7 +356,7 @@ class RinDiffusionModel(torch.nn.Module):
         # print(f'images_init: {images.shape}')
         # print(f'masks: {masks.shape}')
         # print(f'image_masks: {image_mask.shape}')
-        images, noise, _, pred_dict = self.noise_denoise(images, masks, labels, pos_embs, nmh, nmw, t=t)
+        images, noise, _, pred_dict = self.noise_denoise(images, pos_embs, labels, offsets, offsets_pos_embs, document_ids)
         # print(f'images: {images.shape}')
         # print(f'noise: {noise.shape}')
         # print(f'pred_noise: {pred_dict["noise_pred"].shape}')
@@ -318,9 +366,9 @@ class RinDiffusionModel(torch.nn.Module):
         # print(f'image_mask: {image_mask.shape}')
         # print(f'masks: {masks.shape}')
         # print(f'images: {images.shape}')
-        images = images[masks]
-        noise = noise[masks]
-        pred_dict["noise_pred"] = pred_dict["noise_pred"][masks]
-        pred_dict["data_pred"] = pred_dict["data_pred"][masks]
+        # images = images[masks]
+        # noise = noise[masks]
+        # pred_dict["noise_pred"] = pred_dict["noise_pred"][masks]
+        # pred_dict["data_pred"] = pred_dict["data_pred"][masks]
         loss = self.compute_loss(images, noise, pred_dict)
         return loss

@@ -13,6 +13,12 @@ from huggingface_hub import HfFileSystem, get_token, hf_hub_url
 from datasets import load_dataset
 
 from .utils.FlexibleCifar import FlexibleCIFAR10
+from .utils.ragged_tensor import (
+    ragged_list_to_tensor, 
+    ragged_tensor_to_list, 
+    get_ragged_lengths,
+    get_document_ids
+)
 
 from PIL import Image
 
@@ -147,45 +153,47 @@ def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
         
         pos_emb = create_2d_sin_cos_pos_emb(nh, nw, tape_dim)
 
-        pixel_mask = torch.ones(h * w)
-        patch_mask = torch.ones(nh * nw)
+        # pixel_mask = torch.ones(h * w)
+        # patch_mask = torch.ones(nh * nw)
 
         # Pad to max tokens / max patches for consistency across the batch
-        pixel_row = torch.nn.functional.pad(pixel_row, (0, 0, 0, nmh * nmw - pixel_row.shape[0]), value=0)
-        pixel_mask = torch.nn.functional.pad(pixel_mask, (0, max_pixels - pixel_mask.shape[0]), value=0)
-        patch_mask = torch.nn.functional.pad(patch_mask, (0, nmh * nmw - patch_mask.shape[0]), value=0)
-        pos_emb = torch.nn.functional.pad(pos_emb, (0, 0, 0, nmh * nmw - pos_emb.shape[0]), value=0)
+        # pixel_row = torch.nn.functional.pad(pixel_row, (0, 0, 0, nmh * nmw - pixel_row.shape[0]), value=0)
+        # pixel_mask = torch.nn.functional.pad(pixel_mask, (0, max_pixels - pixel_mask.shape[0]), value=0)
+        # patch_mask = torch.nn.functional.pad(patch_mask, (0, nmh * nmw - patch_mask.shape[0]), value=0)
+        # pos_emb = torch.nn.functional.pad(pos_emb, (0, 0, 0, nmh * nmw - pos_emb.shape[0]), value=0)
         
-        image_masks.append(pixel_mask)
-        patch_masks.append(patch_mask)
+        # image_masks.append(pixel_mask)
+        # patch_masks.append(patch_mask)
         padded_images.append(pixel_row)
         pos_embs.append(pos_emb)
 
     labels = torch.tensor(labels)
-    padded_images = torch.stack(padded_images)
-    patch_masks = torch.stack(patch_masks).bool()
-    image_masks = torch.stack(image_masks).bool()
-    pos_embs = torch.stack(pos_embs)
+    padded_images, offsets = ragged_list_to_tensor(padded_images)
+    # patch_masks = torch.stack(patch_masks).bool()
+    # image_masks = torch.stack(image_masks).bool()
+    pos_embs, offsets_pos_embs = ragged_list_to_tensor(pos_embs)
 
-    _, token_mask = create_random_token_mask(padded_images, mask_ratio=0.3)
+    document_ids = get_document_ids(offsets)
+
+    # _, token_mask = create_random_token_mask(padded_images, mask_ratio=0.3)
     
-    visible_padded_images = []
-    visible_patch_masks = []
-    visible_pos_embs = []
-    for i, (padded_image, patch_mask, pos_emb) in enumerate(zip(padded_images, patch_masks, pos_embs)):
-        # print(token_mask[i])
-        visible_idx = ~token_mask[i]
-        visible_padded_images.append(padded_image[visible_idx])
-        visible_patch_masks.append(patch_mask[visible_idx])
-        visible_pos_embs.append(pos_emb[visible_idx])
+    # visible_padded_images = []
+    # visible_patch_masks = []
+    # visible_pos_embs = []
+    # for i, (padded_image, patch_mask, pos_emb) in enumerate(zip(padded_images, patch_masks, pos_embs)):
+    #     # print(token_mask[i])
+    #     visible_idx = ~token_mask[i]
+    #     visible_padded_images.append(padded_image[visible_idx])
+    #     visible_patch_masks.append(patch_mask[visible_idx])
+    #     visible_pos_embs.append(pos_emb[visible_idx])
     
-    visible_padded_images = torch.stack(visible_padded_images)
-    visible_patch_masks = torch.stack(visible_patch_masks)
-    visible_pos_embs = torch.stack(visible_pos_embs)
+    # visible_padded_images = torch.stack(visible_padded_images)
+    # visible_patch_masks = torch.stack(visible_patch_masks)
+    # visible_pos_embs = torch.stack(visible_pos_embs)
 
     # print(f'visible_padded_images.shape: {visible_padded_images.shape}')
     
-    return visible_padded_images, visible_patch_masks, image_masks, labels, visible_pos_embs, nmh, nmw
+    return padded_images, pos_embs, labels, offsets, offsets_pos_embs, document_ids
 
 
 class ImageNetDataModule(LightningDataModule):
@@ -253,17 +261,25 @@ class RinLightningModule(LightningModule):
         self.num_classes = rin_config["num_classes"]
         self.patch_size = rin_config["patch_size"]
     
-    def forward(self, batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw):
-        return self.diffusion_model(batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw)
+    def forward(self, batch_img, pos_embs, batch_class, offsets, offsets_pos_embs, document_ids):
+        return self.diffusion_model(batch_img, pos_embs, batch_class, offsets, offsets_pos_embs, document_ids)
     
     def training_step(self, batch, batch_idx):
         opt = self.optimizers()
         
-        batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw = batch
+        # batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw = batch
+        batch_img, pos_embs, batch_class, offsets, offsets_pos_embs, document_ids = batch
         batch_class = torch.nn.functional.one_hot(batch_class, num_classes=self.num_classes).float()
 
+        # print(f'batch_img: {batch_img.shape}')
+        # print(f'pos_embs: {pos_embs.shape}')
+        # print(f'batch_class: {batch_class.shape}')
+        # print(f'offsets: {offsets.shape}')
+        # print(f'offsets_pos_embs: {offsets_pos_embs.shape}')
+        # print(f'document_ids: {document_ids.shape}')
+
         opt.zero_grad()
-        loss = self(batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw)
+        loss = self(batch_img, pos_embs, batch_class, offsets, offsets_pos_embs, document_ids)
         self.manual_backward(loss)
         opt.step()
 
@@ -287,7 +303,7 @@ class RinLightningModule(LightningModule):
         # Generate samples
         if self.global_step % self.sample_every == 0:
             self.ema_diffusion_model.eval()
-            n = 8
+            n = 2
             samples = self.ema_diffusion_model.sample(num_samples=n * n, image_height=256, image_width=256, tape_dim=self.tape_dim, **self.sampling_kwargs)
             grid = torchvision.utils.make_grid(samples, nrow=n, normalize=True, value_range=(0, 1), padding=0)
             self.logger.experiment.log({"samples": [wandb.Image(grid)]}, step=self.global_step)

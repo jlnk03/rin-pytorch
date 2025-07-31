@@ -1,8 +1,21 @@
 import torch
 import torch.nn as nn
+from functools import lru_cache
+from torch.nn.attention.flex_attention import flex_attention, create_block_mask
+
+from torch import compile
 
 from .DropPath import DropPath
 from .MLP import MLP
+
+flex_attention = compile(flex_attention)
+create_block_mask = compile(create_block_mask)
+
+
+# @lru_cache
+def create_block_mask_cached(score_mod, B, H, M, N, device):
+    block_mask = create_block_mask(score_mod, B, H, M, N, device=device)
+    return block_mask
 
 
 class TransformerDecoderLayer(torch.nn.Module):
@@ -53,6 +66,15 @@ class TransformerDecoderLayer(torch.nn.Module):
                 self.enc_ln = nn.Identity()
                 
             dim_x_att = dim if dim_x_att is None else dim_x_att
+            
+            # Add projection layer for FlexAttention to match dimensions
+            if dim != dim_x_att:
+                self.query_proj = nn.Linear(dim, dim_x_att, bias=False)
+
+                self.output_proj = nn.Linear(dim_x_att, dim, bias=False)
+            else:
+                self.query_proj = nn.Identity()
+            
             self.cross_mha = nn.MultiheadAttention(
                 embed_dim=dim,
                 num_heads=num_heads,
@@ -78,7 +100,8 @@ class TransformerDecoderLayer(torch.nn.Module):
         self,
         x: torch.Tensor,
         enc: torch.Tensor,
-        masks: torch.Tensor | None = None,
+        # masks: torch.Tensor | None = None,
+        document_ids, latent_document_ids,
         mode: str | None = None,
     ) -> torch.Tensor:
         if self.self_attention:
@@ -89,29 +112,51 @@ class TransformerDecoderLayer(torch.nn.Module):
         if self.cross_attention:
             # print(mode)
             # print(f'x: {x.shape}, enc: {enc.shape}')
+            # print(f'type enc: {type(enc)}')
             x_ln = self.cross_ln(x)
             enc = self.enc_ln(enc)
-            # print(f'x_ln: {x_ln.shape}, enc: {enc.shape}')
-            # apply masks from var image sizes to cross attention only and not self attention
-            # x_res, _ = self.cross_mha(query=x_ln, key=enc, value=enc, need_weights=False, key_padding_mask=masks)
-            # Reshape mask to (batch_size, latent_len, image_len)
-            if masks is not None:
-                # print(f'masks: {masks.shape}')
-                # Get latent length from query tensor x_ln
-                if mode == "read":
-                    # Expand mask to include latent dimension
-                    latent_len = x_ln.shape[1]
-                    masks = masks.unsqueeze(1).expand(-1, latent_len, -1)
-                    # print(f'masks inserted: {masks.shape}')
-                    # print(f'masks sum latents: {masks.sum(dim=1)}')
-                else:
-                    latent_len = enc.shape[1]
-                    masks = masks.unsqueeze(2).expand(-1, -1, latent_len)
-                masks = masks.repeat_interleave(self.num_heads, dim=0)
-                # print(f'masks repeated: {masks.shape}')
-                # Invert mask since PyTorch attention masks use True to indicate positions to mask
-                masks = ~masks.bool()
-            x_res, _ = self.cross_mha(query=x_ln, key=enc, value=enc, need_weights=False, attn_mask=masks)
+            
+            # Project query to match key/value dimension for FlexAttention
+            x_ln_proj = self.query_proj(x_ln)
+            # print(f'x_ln_proj: {x_ln_proj.shape}, enc: {enc.shape}')
+            # print(f'latent_document_ids: {latent_document_ids}, document_ids: {document_ids}')
+
+            # Create document mask for cross attention: latent tokens can only attend to input tokens from same document
+            def cross_document_mask(b, h, q_idx, kv_idx):
+                return latent_document_ids[q_idx] == document_ids[kv_idx]
+            
+            # Use FlexAttention with document masking
+            # Handle enc shape (could be [seq_len, dim] or [1, seq_len, dim])
+            if enc.ndim == 3:
+                enc = enc.squeeze(0)  # Remove batch dimension
+            
+            batch_size = 1  # We have flattened batches
+            seq_len_q = x_ln_proj.shape[0]
+            seq_len_kv = enc.shape[0]
+            embed_dim = x_ln_proj.shape[-1]  # Now both should have same dim
+            head_dim = embed_dim // self.num_heads
+
+            # print(f'embed_dim: {embed_dim}, head_dim: {head_dim}, num heads: {self.num_heads}')
+            
+            # Reshape query, key, value for FlexAttention
+            q = x_ln_proj.view(batch_size, self.num_heads, seq_len_q, head_dim)
+            k = enc.view(batch_size, self.num_heads, seq_len_kv, head_dim)
+            v = enc.view(batch_size, self.num_heads, seq_len_kv, head_dim)
+
+            # print(f'q: {q.shape}, k: {k.shape}, v: {v.shape}')
+
+            block_mask = create_block_mask_cached(cross_document_mask, batch_size, self.num_heads, seq_len_q, seq_len_kv, device=q.device)
+            
+            # Apply FlexAttention with document masking
+            x_res = flex_attention(q, k, v, block_mask=block_mask)
+            
+            # Reshape back to original format
+            x_res = x_res.view(seq_len_q, embed_dim)
+            
+            # Project back to original dimension
+            x_res = self.output_proj(x_res)
+            # print(f'x_res: {x_res.shape}')
+
             x = x + self.dropp(x_res)
             
         if self.use_mlp:

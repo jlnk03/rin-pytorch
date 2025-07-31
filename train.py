@@ -35,7 +35,7 @@ def main():
     config["trainer"]["checkpoint_folder"] = f"{config['trainer']['checkpoint_folder']}{config['trainer']['run_name']}_{timestamp}"
     
     data_module = ImageNetDataModule(config)
-    model = RinLightningModule(config)
+    
     
     # Initialize WandB logger if applicable, with resume functionality
     wandb_logger = None
@@ -64,13 +64,16 @@ def main():
         logger=wandb_logger,
         callbacks=[checkpoint_callback, lr_monitor],
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
-        num_nodes= 4,
-        devices=4,
+        num_nodes= 1,
+        devices=1,
         precision="bf16" if config["trainer"]["fp16"] else "32",
         gradient_clip_val=config["trainer"]["clip_grad_norm"],
         strategy='ddp_find_unused_parameters_true' if torch.cuda.device_count() > 1 else "auto",
         log_every_n_steps=config["trainer"]["log_every_n_steps"]
     )
+
+    with trainer.init_module():
+        model = RinLightningModule(config)
     
     # Pass the resume checkpoint path to trainer.fit() to resume from a given checkpoint
     trainer.fit(model, datamodule=data_module, ckpt_path=args.resume_checkpoint)
