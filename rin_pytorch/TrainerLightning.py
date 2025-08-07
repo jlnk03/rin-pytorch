@@ -260,6 +260,9 @@ class RinLightningModule(LightningModule):
         self.tape_dim = rin_config["tape_dim"]
         self.num_classes = rin_config["num_classes"]
         self.patch_size = rin_config["patch_size"]
+
+        self.image_height = rin_config["image_height"]
+        self.image_width = rin_config["image_width"]
     
     def forward(self, batch_img, pos_embs, batch_class, offsets, offsets_pos_embs, document_ids):
         return self.diffusion_model(batch_img, pos_embs, batch_class, offsets, offsets_pos_embs, document_ids)
@@ -304,15 +307,15 @@ class RinLightningModule(LightningModule):
         if self.global_step % self.sample_every == 0:
             self.ema_diffusion_model.eval()
             n = 2
-            samples = self.ema_diffusion_model.sample(num_samples=n * n, image_height=256, image_width=256, tape_dim=self.tape_dim, **self.sampling_kwargs)
+            samples = self.ema_diffusion_model.sample(num_samples=n * n, image_height=self.image_height, image_width=self.image_width, tape_dim=self.tape_dim, **self.sampling_kwargs)
             grid = torchvision.utils.make_grid(samples, nrow=n, normalize=True, value_range=(0, 1), padding=0)
             self.logger.experiment.log({"samples": [wandb.Image(grid)]}, step=self.global_step)
 
-            samples_horizontal = self.ema_diffusion_model.sample(num_samples=n * n, image_height=128, image_width=256, tape_dim=self.tape_dim, **self.sampling_kwargs)
+            samples_horizontal = self.ema_diffusion_model.sample(num_samples=n * n, image_height=self.image_height // 2, image_width=self.image_width, tape_dim=self.tape_dim, **self.sampling_kwargs)
             grid_horizontal = torchvision.utils.make_grid(samples_horizontal, nrow=n, normalize=True, value_range=(0, 1), padding=0)
             self.logger.experiment.log({"samples_horizontal": [wandb.Image(grid_horizontal)]}, step=self.global_step)
 
-            samples_vertical = self.ema_diffusion_model.sample(num_samples=n * n, image_height=256, image_width=128, tape_dim=self.tape_dim, **self.sampling_kwargs)
+            samples_vertical = self.ema_diffusion_model.sample(num_samples=n * n, image_height=self.image_height, image_width=self.image_width // 2, tape_dim=self.tape_dim, **self.sampling_kwargs)
             grid_vertical = torchvision.utils.make_grid(samples_vertical, nrow=n, normalize=True, value_range=(0, 1), padding=0)
             self.logger.experiment.log({"samples_vertical": [wandb.Image(grid_vertical)]}, step=self.global_step)
 

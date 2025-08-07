@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from torch.nn.attention.flex_attention import flex_attention, create_block_mask
+from torch.nn.attention.flex_attention import flex_attention, create_block_mask, BlockMask
 from functools import lru_cache
 
 from torch import compile
@@ -12,9 +12,41 @@ flex_attention = compile(flex_attention)
 create_block_mask = compile(create_block_mask)
 
 # @lru_cache
-def create_block_mask_cached(score_mod, B, H, M, N, device):
-    block_mask = create_block_mask(score_mod, B, H, M, N, device=device)
-    return block_mask
+# def create_block_mask_cached(score_mod, B, H, M, N, device):
+#     block_mask = create_block_mask(score_mod, B, H, M, N, device=device)
+#     return block_mask
+
+
+def create_document_block_mask(
+    latent_document_ids: torch.Tensor,
+    device: torch.device,
+) -> BlockMask:
+    """
+    Create a block mask for document masking using FlexAttention.
+    
+    Args:
+        latent_document_ids: Document IDs for each token, shape (seq_len,)
+        
+    Returns:
+        BlockMask for FlexAttention that restricts attention to same-document tokens
+    """
+    seq_len = latent_document_ids.shape[0]
+    
+    def _document_masking(
+        b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
+    ) -> torch.Tensor:
+        # Same document check: tokens can only attend to other tokens from same document
+        return latent_document_ids[q_idx] == latent_document_ids[kv_idx]
+    
+    # Create the block mask for FlexAttention
+    return create_block_mask(
+        mask_mod=_document_masking,
+        B=None,
+        H=None,
+        Q_LEN=seq_len,
+        KV_LEN=seq_len,
+        device=device,
+    )
 
 
 class TransformerEncoderLayer(torch.nn.Module):
@@ -59,30 +91,26 @@ class TransformerEncoderLayer(torch.nn.Module):
         if self.self_attention:
             x_ln = self.mha_ln(x)
             
-            # Create document mask for self-attention: latent tokens can only attend to other latent tokens from same document
-            def document_masking(b, h, q_idx, kv_idx):
-                return latent_document_ids[q_idx] == latent_document_ids[kv_idx]
-            
             # Use FlexAttention with document masking
+            # Create document block mask
+            block_mask = create_document_block_mask(latent_document_ids, device=x.device)
+            
             # Reshape for FlexAttention: (seq_len, embed_dim) -> (1, seq_len, num_heads, head_dim)
             batch_size = 1  # We have flattened batches
             seq_len = x_ln.shape[0]
             embed_dim = x_ln.shape[-1]
             head_dim = embed_dim // self.mha.num_heads
             
-            # Reshape query, key, value for FlexAttention
-            q = x_ln.view(batch_size, self.mha.num_heads, seq_len, head_dim)
-            k = x_ln.view(batch_size, self.mha.num_heads, seq_len, head_dim)
-            v = x_ln.view(batch_size, self.mha.num_heads, seq_len, head_dim)
-
-            # print(f'q: {q.shape}, k: {k.shape}, v: {v.shape}')
+            # Reshape query, key, value for FlexAttention: (seq_len, embed_dim) -> (batch, seq_len, num_heads, head_dim) -> (batch, num_heads, seq_len, head_dim)
+            q = x_ln.view(batch_size, seq_len, self.mha.num_heads, head_dim).transpose(1, 2)
+            k = x_ln.view(batch_size, seq_len, self.mha.num_heads, head_dim).transpose(1, 2)
+            v = x_ln.view(batch_size, seq_len, self.mha.num_heads, head_dim).transpose(1, 2)
             
             # Apply FlexAttention with document masking
-            block_mask = create_block_mask_cached(document_masking, batch_size, self.mha.num_heads, seq_len, seq_len, device=q.device)
             x_residual = flex_attention(q, k, v, block_mask=block_mask)
             
-            # Reshape back to original format
-            x_residual = x_residual.view(seq_len, embed_dim)
+            # Reshape back to original format: (batch, num_heads, seq_len, head_dim) -> (batch, seq_len, num_heads, head_dim) -> (seq_len, embed_dim)
+            x_residual = x_residual.transpose(1, 2).contiguous().view(seq_len, embed_dim)
             x = x + self.dropp(x_residual)
         x = self.mlp(x)
         return (x, latent_document_ids)

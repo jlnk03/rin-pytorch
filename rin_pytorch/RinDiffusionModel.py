@@ -106,6 +106,8 @@ class RinDiffusionModel(torch.nn.Module):
         nmh = image_shape[1] // patch_size
         nmw = image_shape[2] // patch_size
 
+        print(f'num classes: {self._num_classes}')
+
         # Prepare class-conditional input if needed
         if self._conditional == "class":
             if class_override is not None:
@@ -269,53 +271,52 @@ class RinDiffusionModel(torch.nn.Module):
         latent_length = bsz * self.denoiser._latent_slots
         latent_prev = torch.zeros((latent_length, self.denoiser.latent_dim), device=images.device)
 
-        if self._self_cond != "none" and self._self_cond_rate > 0.0:
-            print(f'self_cond: {self._self_cond}')
-            # Create document-level mask
-            doc_mask = torch.rand(bsz, device=images.device) < self._self_cond_rate
+        # if self._self_cond != "none" and self._self_cond_rate > 0.0:
+        #     print(f'self_cond: {self._self_cond}')
+        #     # Create document-level mask
+        #     doc_mask = torch.rand(bsz, device=images.device) < self._self_cond_rate
 
-            if torch.any(doc_mask):
-                # For simplicity, process all data but only update the masked documents
-                # This avoids the complexity of recomputing offsets for subsets
+        #     if torch.any(doc_mask):
+        #         # For simplicity, process all data but only update the masked documents
+        #         # This avoids the complexity of recomputing offsets for subsets
 
-                # Expand document-level mask to patch-level and latent-level masks
-                patch_mask = doc_mask[document_ids]  # [total_patches]
-                latent_mask = torch.repeat_interleave(doc_mask, self.denoiser._latent_slots)  # [bsz * latent_slots]
-                # print(f'latent_mask: {latent_mask.shape}')
-                # print(f'patch_mask: {patch_mask.shape}')
+        #         # Expand document-level mask to patch-level and latent-level masks
+        #         patch_mask = doc_mask[document_ids]  # [total_patches]
+        #         latent_mask = torch.repeat_interleave(doc_mask, self.denoiser._latent_slots)  # [bsz * latent_slots]
+        #         # print(f'latent_mask: {latent_mask.shape}')
+        #         # print(f'patch_mask: {patch_mask.shape}')
 
-                # print(f'images_noised: {images_noised.shape}')
-                # print(f'images noised mask: {images_noised[patch_mask].shape}')
-                # print(f'latent masked: {latent_prev[latent_mask].shape}')
+        #         # print(f'images_noised: {images_noised.shape}')
+        #         # print(f'images noised mask: {images_noised[patch_mask].shape}')
+        #         # print(f'latent masked: {latent_prev[latent_mask].shape}')
                 
-                with torch.no_grad():
-                    _, latent_prev_out, tape_prev_out = self.denoise(
-                        # x=images_noised[mask],
-                        # gamma=gamma[mask],
-                        # cond=labels[mask],
-                        # masks=masks[mask],
-                        # pos_embs=pos_embs[mask],
-                        # nmh=nmh,
-                        # nmw=nmw,
-                        images_noised[patch_mask],
-                        gamma[patch_mask],
-                        labels[doc_mask],
-                        pos_embs[patch_mask],
-                        offsets,
-                        offsets_pos_embs,
-                        document_ids[patch_mask],
-                        latent_prev[latent_mask],
-                        tape_prev[patch_mask]
-                    )
+        #         with torch.no_grad():
+        #             _, latent_prev_out, tape_prev_out = self.denoise(
+        #                 # x=images_noised[mask],
+        #                 # gamma=gamma[mask],
+        #                 # cond=labels[mask],
+        #                 # masks=masks[mask],
+        #                 # pos_embs=pos_embs[mask],
+        #                 # nmh=nmh,
+        #                 # nmw=nmw,
+        #                 images_noised[patch_mask],
+        #                 gamma[patch_mask],
+        #                 labels[doc_mask],
+        #                 pos_embs[patch_mask],
+        #                 offsets,
+        #                 offsets_pos_embs,
+        #                 document_ids[patch_mask],
+        #                 latent_prev[latent_mask],
+        #                 tape_prev[patch_mask]
+        #             )
 
-                # Update only the selected documents
-                latent_prev[latent_mask] = latent_prev_out.detach()
-                tape_prev[patch_mask] = tape_prev_out.detach()
-                print(f'latent_prev: {latent_prev.shape}')
+        #         # Update only the selected documents
+        #         latent_prev[latent_mask] = latent_prev_out.detach()
+        #         tape_prev[patch_mask] = tape_prev_out.detach()
+        #         print(f'latent_prev: {latent_prev.shape}')
 
         # pass masks to denoise
         denoise_out, _, _ = self.denoise(images_noised, gamma, labels, pos_embs, offsets, offsets_pos_embs, document_ids, latent_prev, tape_prev)
-        print(f'denoise_out: {denoise_out.shape}')
         # print(f'denoise_out: {denoise_out.shape}')
         # print(f'gamma: {gamma.shape}')
         # print(f'images_noised: {images_noised.shape}')

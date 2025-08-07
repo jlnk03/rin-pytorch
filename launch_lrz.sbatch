@@ -12,5 +12,5 @@
 
 echo "Starting the job"
 echo "Job ID: $SLURM_JOB_ID"
-srun python train.py --config configs/128.yaml
+srun python train.py --config configs/cifar.yaml
 echo "Job finished"
