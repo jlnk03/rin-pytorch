@@ -32,14 +32,22 @@ from pathlib import Path
 from typing import Tuple, List
 
 import torch
+import numpy as np
 
 # -----------------------------------------------------------------------------
 # Helper functions
 # -----------------------------------------------------------------------------
 
 def _flatten_state_dict(state_dict: dict) -> torch.Tensor:
-    """Flatten a state_dict into a single 1-D tensor for fast global diffs."""
-    return torch.nn.utils.parameters_to_vector([p.reshape(-1) for p in state_dict.values()])
+    """Flatten only tensor entries of a state_dict into a single 1-D vector.
+
+    Non-tensor items (ints, strings, lists) are silently ignored to avoid
+    attribute errors like `'int' object has no attribute 'reshape'`.
+    """
+    flat_tensors = [p.reshape(-1) for p in state_dict.values() if isinstance(p, torch.Tensor)]
+    if len(flat_tensors) == 0:
+        raise ValueError("State-dict contains no tensors to compare.")
+    return torch.nn.utils.parameters_to_vector(flat_tensors)
 
 
 def _load_state_dict(path: str | Path) -> dict:
@@ -47,7 +55,11 @@ def _load_state_dict(path: str | Path) -> dict:
     if not path.is_file():
         raise FileNotFoundError(path)
     print(f"Loading checkpoint: {path}")
-    return torch.load(path, map_location="cpu")
+    ckpt = torch.load(path, map_location="cpu")
+    # For PyTorch Lightning checkpoints grab the nested state_dict
+    if isinstance(ckpt, dict) and "state_dict" in ckpt:
+        ckpt = ckpt["state_dict"]
+    return ckpt
 
 
 # -----------------------------------------------------------------------------
@@ -58,6 +70,9 @@ def compare_checkpoints(
     ckpt_a: str | Path,
     ckpt_b: str | Path,
     topk: int = 5,
+    csv_dir: str | None = None,
+    key_filter: str | None = None,
+    quantize_int4: bool = False,
 ) -> Tuple[float, float]:
     """Compare two checkpoints and print summary statistics.
 
@@ -71,14 +86,87 @@ def compare_checkpoints(
     sd_a = _load_state_dict(ckpt_a)
     sd_b = _load_state_dict(ckpt_b)
 
-    if sd_a.keys() != sd_b.keys():
-        diff_keys = sd_a.keys() ^ sd_b.keys()
-        raise ValueError(
-            f"State-dict keys mismatch! Differing keys ({len(diff_keys)}):\n" + "\n".join(sorted(diff_keys))
-        )
+    # ------------------------------------------------------------------
+    # 1) Handle key mismatches gracefully
+    # ------------------------------------------------------------------
+    keys_a_full = sorted(sd_a.keys())
+    keys_b_full = sorted(sd_b.keys())
+    Path("keys_A.txt").write_text("\n".join(keys_a_full))
+    Path("keys_B.txt").write_text("\n".join(keys_b_full))
+    print("Saved full key lists → keys_A.txt / keys_B.txt")
 
+    keys_a = set(keys_a_full)
+    keys_b = set(keys_b_full)
+
+    only_a = sorted(keys_a - keys_b)
+    only_b = sorted(keys_b - keys_a)
+    intersect = sorted(keys_a & keys_b)
+
+    if only_a or only_b:
+        print("WARNING: State-dict keys differ – continuing with intersection only.")
+        if only_a:
+            print(f"  • {len(only_a)} keys only in A → saved to missing_in_B.txt")
+            Path("missing_in_B.txt").write_text("\n".join(only_a))
+        if only_b:
+            print(f"  • {len(only_b)} keys only in B → saved to missing_in_A.txt")
+            Path("missing_in_A.txt").write_text("\n".join(only_b))
+
+    # Keep only overlapping tensors
+    sd_a = {k: sd_a[k] for k in intersect if isinstance(sd_a[k], torch.Tensor)}
+    sd_b = {k: sd_b[k] for k in intersect if isinstance(sd_b[k], torch.Tensor)}
+
+    # Optional: filter keys
+    if key_filter:
+        keys = [k for k in sd_a.keys() if key_filter in k]
+        sd_a = {k: sd_a[k] for k in keys}
+        sd_b = {k: sd_b[k] for k in keys}
+
+    # Optionally dump the overlapping tensors so the user can inspect in e.g. netron / python
+    torch.save(sd_a, "ckptA_overlap.pt")
+    torch.save(sd_b, "ckptB_overlap.pt")
+    print("Saved overlapping tensor weights → ckptA_overlap.pt / ckptB_overlap.pt")
+
+    # Optional: dump CSVs for overlapping tensors
+    if csv_dir is not None:
+        out_dir = Path(csv_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        def _sanitize(name: str) -> str:
+            return name.replace("/", "_").replace(".", "_")
+
+        def _quantize_to_int4(x: torch.Tensor) -> np.ndarray:
+            x = x.detach().to(torch.float32)
+            scale = x.abs().max().clamp(min=1e-12) / 7.0
+            q = torch.round(x / scale).clamp(-8, 7).to(torch.int8)
+            return q.view(-1).cpu().numpy()
+
+        for name in sd_a:
+            a = sd_a[name]
+            b = sd_b[name]
+            safe = _sanitize(name)
+
+            if quantize_int4:
+                a_arr = _quantize_to_int4(a)
+                b_arr = _quantize_to_int4(b)
+            else:
+                a_arr = a.view(-1).detach().cpu().numpy()
+                b_arr = b.view(-1).detach().cpu().numpy()
+
+            n = min(a_arr.shape[0], b_arr.shape[0])
+            merged = np.stack([a_arr[:n], b_arr[:n]], axis=1)
+            header = "A_int4,B_int4" if quantize_int4 else "A_float,B_float"
+            np.savetxt(out_dir / f"{safe}.csv", merged, delimiter=",", header=header, comments="")
+        print(f"Saved CSV dumps for {len(sd_a)} tensors → {out_dir}")
+
+    # Optionally compute global metrics only if the flattened vectors have equal length
     vec_a = _flatten_state_dict(sd_a)
     vec_b = _flatten_state_dict(sd_b)
+
+    if vec_a.numel() != vec_b.numel():
+        print("WARNING: Overlapping tensors have different total number of elements.")
+        print(f"  • A: {vec_a.numel():,} elements\n  • B: {vec_b.numel():,} elements")
+        print("Skipping global L2 / cosine stats – raw weights saved for manual inspection.")
+        return float('nan'), float('nan')
 
     diff_vec = vec_a - vec_b
     l2 = diff_vec.norm().item()
@@ -111,6 +199,9 @@ def main(argv: List[str] | None = None) -> None:
 
     # Simple manual arg-parsing so we keep the script dependency-free
     topk = 5
+    csv_dir: str | None = None
+    key_filter: str | None = None
+    quantize_int4 = False
     if "--topk" in argv:
         idx = argv.index("--topk")
         try:
@@ -120,10 +211,30 @@ def main(argv: List[str] | None = None) -> None:
         # Remove the two consumed args
         del argv[idx : idx + 2]
 
+    if "--csv-dir" in argv:
+        idx = argv.index("--csv-dir")
+        try:
+            csv_dir = argv[idx + 1]
+        except (IndexError, ValueError):
+            raise SystemExit("Error: --csv-dir must be followed by a directory path")
+        del argv[idx : idx + 2]
+
+    if "--filter" in argv:
+        idx = argv.index("--filter")
+        try:
+            key_filter = argv[idx + 1]
+        except (IndexError, ValueError):
+            raise SystemExit("Error: --filter must be followed by a substring")
+        del argv[idx : idx + 2]
+
+    if "--quantize-int4" in argv:
+        quantize_int4 = True
+        argv.remove("--quantize-int4")
+
     # Hard-coded fallback (edit to taste)
     HARD_CODED_CHECKPOINTS = [
-        "/absolute/path/to/checkpoint_A.pt",  # <- edit me
-        "/absolute/path/to/checkpoint_B.pt",  # <- edit me
+        "/dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/cifar/masked/cifar_flex_nested_20250807_134133/model-step=2000.ckpt",
+        "/dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/cifar/cifar_flex_no_self_cond_20250807_140552/model-step=2000.ckpt",
     ]
 
     if len(argv) == 2:
@@ -134,7 +245,14 @@ def main(argv: List[str] | None = None) -> None:
     else:
         raise SystemExit("Usage: python compare_weights.py ckpt_A ckpt_B [--topk 10]")
 
-    compare_checkpoints(ckpt_a, ckpt_b, topk=topk)
+    compare_checkpoints(
+        ckpt_a,
+        ckpt_b,
+        topk=topk,
+        csv_dir=csv_dir,
+        key_filter=key_filter,
+        quantize_int4=quantize_int4,
+    )
 
 
 if __name__ == "__main__":
