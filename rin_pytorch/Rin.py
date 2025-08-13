@@ -349,6 +349,7 @@ class Rin(torch.nn.Module):
         pos_embs = pos_embs.to(tape.device)
         tape = self.stem_ln(tape)
         tape += pos_embs
+        # tape = tape + self.tape_pos_emb
 
         if self._self_cond in ["tape", "latent+tape"] and tape_prev is not None:
             tape = tape + self.tape_prev_ln(self.tape_prev_proj(tape_prev))
