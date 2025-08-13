@@ -298,8 +298,8 @@ class Rin(torch.nn.Module):
         tape_prev: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         tape_r = None
-        if not self._time_on_latent and time_emb is not None:
-            tape_r = time_emb
+        # if not self._time_on_latent and time_emb is not None:
+        #     tape_r = time_emb
         if not self._cond_on_latent and cond is not None:
             tape_r = _concat_tokens(tape_r, cond)
 
@@ -463,6 +463,10 @@ class Rin(torch.nn.Module):
 
         if self._cond_on_latent and cond is None:
             raise ValueError("cond is None but cond_on_latent is True")
+
+        # print(f'masks: {masks.shape}')
+        # print(f'x: {x.shape}')
+        # print(f'pos_embs: {pos_embs.shape}')
 
         time_emb, cond = self.initialize_cond(t, cond)
         tape, tape_r = self.initialize_tape(

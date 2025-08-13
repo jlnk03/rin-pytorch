@@ -88,10 +88,10 @@ class TransformerDecoderLayer(torch.nn.Module):
             
         if self.cross_attention:
             # print(mode)
-            print(f'x: {x.shape}, enc: {enc.shape}')
+            # print(f'x: {x.shape}, enc: {enc.shape}')
             x_ln = self.cross_ln(x)
             enc = self.enc_ln(enc)
-            print(f'x_ln: {x_ln.shape}, enc: {enc.shape}')
+            # print(f'x_ln: {x_ln.shape}, enc: {enc.shape}')
             # apply masks from var image sizes to cross attention only and not self attention
             # x_res, _ = self.cross_mha(query=x_ln, key=enc, value=enc, need_weights=False, key_padding_mask=masks)
             # Reshape mask to (batch_size, latent_len, image_len)
@@ -111,6 +111,7 @@ class TransformerDecoderLayer(torch.nn.Module):
                 # print(f'masks repeated: {masks.shape}')
                 # Invert mask since PyTorch attention masks use True to indicate positions to mask
                 masks = ~masks.bool()
+
             x_res, _ = self.cross_mha(query=x_ln, key=enc, value=enc, need_weights=False, attn_mask=masks)
             x = x + self.dropp(x_res)
             
