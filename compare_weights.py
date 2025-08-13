@@ -3,14 +3,14 @@
 compare_weights.py
 ==================
 
-Quick utility to inspect how much **two** PyTorch checkpoints differ.
+Quick utility to inspect how much two PyTorch checkpoints differ.
 
 Usage
 -----
     python compare_weights.py /path/to/ckpt_A.pt /path/to/ckpt_B.pt [--topk 10]
 
-If the two paths are *not* supplied on the command line the script will fall
-back to the hard-coded paths in `HARD_CODED_CHECKPOINTS` – handy when you are
+If the two paths are not supplied on the command line the script will fall
+back to the hard-coded paths in HARD_CODED_CHECKPOINTS – handy when you are
 iterating on the same pair of files again and again.
 
 What you get
@@ -23,7 +23,11 @@ What you get
    • Mean absolute difference for every tensor.
    • The top-k tensors with the largest drift are printed (k is configurable).
 
-This makes it trivial to locate the first layer that has started diverging.
+Additionally, the script writes:
+   • keys_A.txt / keys_B.txt                – full key lists per checkpoint
+   • missing_in_B.txt / missing_in_A.txt    – keys only present in one side
+   • shape_mismatch.txt                     – overlapping keys with shape diffs
+   • ckptA_overlap.pt / ckptB_overlap.pt    – tensors for overlapping same-shaped keys
 
 Author: ChatGPT (generated on request)
 """
@@ -33,6 +37,7 @@ from typing import Tuple, List
 
 import torch
 import numpy as np
+
 
 # -----------------------------------------------------------------------------
 # Helper functions
@@ -111,9 +116,29 @@ def compare_checkpoints(
             print(f"  • {len(only_b)} keys only in B → saved to missing_in_A.txt")
             Path("missing_in_A.txt").write_text("\n".join(only_b))
 
-    # Keep only overlapping tensors
-    sd_a = {k: sd_a[k] for k in intersect if isinstance(sd_a[k], torch.Tensor)}
-    sd_b = {k: sd_b[k] for k in intersect if isinstance(sd_b[k], torch.Tensor)}
+    # Keep only overlapping tensors and further restrict to identical shapes
+    sd_a_tensors = {k: v for k, v in sd_a.items() if isinstance(v, torch.Tensor)}
+    sd_b_tensors = {k: v for k, v in sd_b.items() if isinstance(v, torch.Tensor)}
+
+    shape_mismatch: List[str] = []
+    matched_keys: List[str] = []
+    for k in intersect:
+        if k in sd_a_tensors and k in sd_b_tensors:
+            if sd_a_tensors[k].shape == sd_b_tensors[k].shape:
+                matched_keys.append(k)
+            else:
+                shape_mismatch.append(
+                    f"{k}: {tuple(sd_a_tensors[k].shape)} vs {tuple(sd_b_tensors[k].shape)}"
+                )
+
+    if shape_mismatch:
+        Path("shape_mismatch.txt").write_text("\n".join(shape_mismatch))
+        print(
+            f"Found {len(shape_mismatch)} overlapping keys with different shapes → shape_mismatch.txt"
+        )
+
+    sd_a = {k: sd_a_tensors[k] for k in matched_keys}
+    sd_b = {k: sd_b_tensors[k] for k in matched_keys}
 
     # Optional: filter keys
     if key_filter:
@@ -121,7 +146,7 @@ def compare_checkpoints(
         sd_a = {k: sd_a[k] for k in keys}
         sd_b = {k: sd_b[k] for k in keys}
 
-    # Optionally dump the overlapping tensors so the user can inspect in e.g. netron / python
+    # Optionally dump the overlapping tensors so the user can inspect
     torch.save(sd_a, "ckptA_overlap.pt")
     torch.save(sd_b, "ckptB_overlap.pt")
     print("Saved overlapping tensor weights → ckptA_overlap.pt / ckptB_overlap.pt")
@@ -158,12 +183,12 @@ def compare_checkpoints(
             np.savetxt(out_dir / f"{safe}.csv", merged, delimiter=",", header=header, comments="")
         print(f"Saved CSV dumps for {len(sd_a)} tensors → {out_dir}")
 
-    # Optionally compute global metrics only if the flattened vectors have equal length
+    # Compute global metrics if we still have comparable tensors
     vec_a = _flatten_state_dict(sd_a)
     vec_b = _flatten_state_dict(sd_b)
 
     if vec_a.numel() != vec_b.numel():
-        print("WARNING: Overlapping tensors have different total number of elements.")
+        print("WARNING: Overlapping tensors (same-shaped subset) have different total number of elements.")
         print(f"  • A: {vec_a.numel():,} elements\n  • B: {vec_b.numel():,} elements")
         print("Skipping global L2 / cosine stats – raw weights saved for manual inspection.")
         return float('nan'), float('nan')
@@ -233,7 +258,8 @@ def main(argv: List[str] | None = None) -> None:
 
     # Hard-coded fallback (edit to taste)
     HARD_CODED_CHECKPOINTS = [
-        "/dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/cifar/masked/cifar_flex_nested_20250807_134133/model-step=2000.ckpt",
+        # "/dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/cifar/masked/cifar_flex_nested_20250807_134133/model-step=2000.ckpt",
+        "/dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/cifar/masked/cifar_flex_nested_20250813_104132/last.ckpt",
         "/dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/cifar/cifar_flex_no_self_cond_20250807_140552/model-step=2000.ckpt",
     ]
 
@@ -257,3 +283,4 @@ def main(argv: List[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
+

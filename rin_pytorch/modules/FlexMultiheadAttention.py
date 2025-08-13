@@ -59,7 +59,9 @@ class FlexMultiheadAttention(torch.nn.Module):
                 f"embed_dim ({self.embed_dim}) must be divisible by num_heads ({self.num_heads})"
             )
 
-        self.num_kv_heads = num_kv_heads or num_heads
+        # Remove GQA to minimize differences from native nn.MultiheadAttention
+        # Always use num_kv_heads == num_heads
+        self.num_kv_heads = num_heads
 
         # Use native-style in-projection weights.
         # When q/k/v input dims are the same and kv heads == q heads, we can keep a single stacked weight.
@@ -88,8 +90,11 @@ class FlexMultiheadAttention(torch.nn.Module):
             )
             self.register_parameter("in_proj_weight", None)
 
-        # Output projection (keep as Linear for simplicity)
-        self.o_proj = torch.nn.Linear(self.num_heads * self.head_dim, self.out_features, bias=False)
+        # Add native-style input projection bias (shared across q/k/v)
+        self.in_proj_bias = torch.nn.Parameter(torch.zeros(3 * self.embed_dim))
+
+        # Output projection (match native MHA naming and include bias)
+        self.out_proj = torch.nn.Linear(self.num_heads * self.head_dim, self.out_features, bias=True)
 
         # Initialize weights similar to Linear defaults
         if self._qkv_same_embed_dim:
@@ -98,6 +103,11 @@ class FlexMultiheadAttention(torch.nn.Module):
             torch.nn.init.xavier_uniform_(self.q_proj_weight)
             torch.nn.init.xavier_uniform_(self.k_proj_weight)
             torch.nn.init.xavier_uniform_(self.v_proj_weight)
+
+        # Initialize biases like native MHA (_reset_parameters)
+        torch.nn.init.constant_(self.in_proj_bias, 0.0)
+        if self.out_proj.bias is not None:
+            torch.nn.init.constant_(self.out_proj.bias, 0.0)
 
     def forward(
         self,
@@ -137,16 +147,18 @@ class FlexMultiheadAttention(torch.nn.Module):
             # q: [B, L, embed_dim]
             # k,v: [B, S, embed_dim]
             w_q, w_k, w_v = self.in_proj_weight.split(self.embed_dim, dim=0)
-            query_states = torch.nn.functional.linear(query, w_q)
-            key_states = torch.nn.functional.linear(key, w_k)
-            value_states = torch.nn.functional.linear(value, w_v)
+            b_q, b_k, b_v = self.in_proj_bias.split(self.embed_dim, dim=0)
+            query_states = torch.nn.functional.linear(query, w_q, b_q)
+            key_states = torch.nn.functional.linear(key, w_k, b_k)
+            value_states = torch.nn.functional.linear(value, w_v, b_v)
             # key/value currently have embed_dim heads; adjust for GQA not applicable here as heads equal
             kv_proj_heads = self.num_heads
         else:
             # Separate weights to allow kdim/vdim and grouped kv heads
-            query_states = torch.nn.functional.linear(query, self.q_proj_weight)  # [B, L, H*D]
-            key_states = torch.nn.functional.linear(key, self.k_proj_weight)      # [B, S, H_kv*D]
-            value_states = torch.nn.functional.linear(value, self.v_proj_weight)  # [B, S, H_kv*D]
+            b_q, b_k, b_v = self.in_proj_bias.split(self.embed_dim, dim=0)
+            query_states = torch.nn.functional.linear(query, self.q_proj_weight, b_q)  # [B, L, H*D]
+            key_states = torch.nn.functional.linear(key, self.k_proj_weight, b_k)      # [B, S, H_kv*D]
+            value_states = torch.nn.functional.linear(value, self.v_proj_weight, b_v)  # [B, S, H_kv*D]
             kv_proj_heads = self.num_kv_heads
 
         # Reshape to [B, Heads, Len, HeadDim]
@@ -155,10 +167,7 @@ class FlexMultiheadAttention(torch.nn.Module):
         value_states = value_states.view(batch_size, value_states.shape[1], kv_proj_heads, self.head_dim).transpose(1, 2)
 
         # Expand kv heads if grouped-query attention
-        if self.num_kv_heads != self.num_heads:
-            repeats = self.num_heads // self.num_kv_heads
-            key_states = _expand_kv_heads(key_states, repeats)
-            value_states = _expand_kv_heads(value_states, repeats)
+        # With GQA removed, num_kv_heads == num_heads and expansion is unnecessary
 
         # Build optional score modifier for additive masks
         score_mod = None
@@ -185,7 +194,7 @@ class FlexMultiheadAttention(torch.nn.Module):
 
         # Merge heads and project out
         attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, l_query, self.num_heads * self.head_dim)
-        attn_output = self.o_proj(attn_output)  # [B, L, out_features]
+        attn_output = self.out_proj(attn_output)  # [B, L, out_features]
 
         if squeeze_batch:
             attn_output = attn_output.squeeze(0)
