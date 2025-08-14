@@ -259,9 +259,11 @@ def main(argv: List[str] | None = None) -> None:
     # Hard-coded fallback (edit to taste)
     HARD_CODED_CHECKPOINTS = [
         # "/dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/cifar/masked/cifar_flex_nested_20250807_134133/model-step=2000.ckpt",
-        "/dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/cifar/masked/cifar_flex_nested_20250813_104132/last.ckpt",
+        # "/dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/cifar/masked/cifar_flex_nested_20250813_104132/last.ckpt",
+        "/dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/cifar/cifar_flex_no_self_cond_20250813_220028/last.ckpt",
         # "/dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/cifar/cifar_flex_no_self_cond_20250807_140552/model-step=2000.ckpt",
-        "/dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/cifar/cifar_flex_no_self_cond_20250813_115536/last.ckpt",
+        # "/dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/cifar/cifar_flex_no_self_cond_20250813_115536/last.ckpt",
+        "/dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/cifar/masked/cifar_flex_nested_20250813_215518/last.ckpt",
     ]
 
     if len(argv) == 2:

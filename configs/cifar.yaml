@@ -63,6 +63,7 @@ trainer:
   run_name: "cifar_flex_nested"
   log_to_wandb: true
   log_every_n_steps: 10
+  overfit_one_sample: true
 
 run:
   vanilla: false

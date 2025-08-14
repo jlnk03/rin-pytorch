@@ -1,6 +1,6 @@
 import torch
 import torchvision
-from torch.utils.data import DataLoader, IterableDataset
+from torch.utils.data import DataLoader, Dataset, IterableDataset
 from torchvision import transforms
 
 import pytorch_lightning as pl
@@ -83,7 +83,7 @@ class ResizeMaxSide:
             img = img.resize((new_width, new_height), self.interpolation)
         return img
 
-class ImageNetWebDataset(IterableDataset):
+class ImageNetWebDataset(Dataset):
     def __init__(self, split='train', transform=None):
         super().__init__()
         self.transform = transform
@@ -92,9 +92,12 @@ class ImageNetWebDataset(IterableDataset):
             self.dataset = load_dataset("imagenet-1k", split="train", trust_remote_code=True)
         except Exception as e:
             print(e)
-        
-    def __iter__(self):
-        return iter(self.dataset)
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        return self.dataset[idx]
 
 
 def patchify(x: torch.Tensor, p: int) -> torch.Tensor:
@@ -111,11 +114,20 @@ def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
     images = []
     labels = []
     for example in batch:
-        if example["image"].mode == "RGBA":
-            print(f"Warning: Image has 4 channels (RGBA), converting to 3")
-            example["image"] = example["image"].convert("RGB")
-        if transform:
-            example["image"] = transform(example["image"])
+        # Normalize input to RGB and apply transform only when appropriate for the input type
+        img = example["image"]
+        # If PIL.Image, optionally convert RGBA->RGB and apply PIL-based transform pipeline
+        if isinstance(img, Image.Image):
+            if img.mode == "RGBA":
+                print(f"Warning: Image has 4 channels (RGBA), converting to 3")
+                img = img.convert("RGB")
+            if transform:
+                img = transform(img)
+        else:
+            # If already a Tensor, skip PIL-only transforms like ToTensor to avoid type errors
+            # Leave tensor as-is; downstream code expects CHW tensors
+            pass
+        example["image"] = img
         c, _, _ = example["image"].shape
         if c > 3:
             print(f"Warning: Image has {c} channels, truncating to 3")
@@ -200,6 +212,8 @@ class ImageNetDataModule(LightningDataModule):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        self.overfit_one_sample = self.config["trainer"].get("overfit_one_sample", False)
+        self.overfit_class = self.config["trainer"].get("overfit_class", None)
         if self.config["run"]["cifar"]:
             self.transform = transforms.Compose([
                 transforms.RandomHorizontalFlip(),
@@ -223,6 +237,84 @@ class ImageNetDataModule(LightningDataModule):
                 split='train',
                 # transform=self.transform
             )
+
+        # Optionally wrap to overfit on a single sample from a random (or specified) class
+        if self.overfit_one_sample:
+            def extract_label(sample):
+                if isinstance(sample, dict):
+                    return sample.get("label")
+                # Fallbacks if dataset returns tuples
+                if isinstance(sample, tuple) and len(sample) > 1:
+                    return sample[1]
+                return None
+
+            # Decide target class
+            target_class = self.overfit_class
+            if target_class is None:
+                # Prefer picking a random class from config if available
+                try:
+                    num_classes = int(self.config["rin"]["num_classes"])
+                    target_class = torch.randint(low=0, high=num_classes, size=(1,)).item()
+                except Exception:
+                    target_class = None
+
+            # Find one sample matching the target class (or just take the first)
+            chosen_sample = None
+            try:
+                dataset_len = len(self.train_dataset)
+            except Exception:
+                dataset_len = 0
+
+            if dataset_len and dataset_len > 0:
+                # If we know the length, scan deterministically
+                for idx in range(dataset_len):
+                    sample = self.train_dataset[idx]
+                    if target_class is None or extract_label(sample) == target_class:
+                        chosen_sample = sample
+                        break
+                if chosen_sample is None:
+                    # Fallback to the first sample
+                    chosen_sample = self.train_dataset[0]
+                    target_class = extract_label(chosen_sample)
+            else:
+                # Iterable fallback: iterate a few times to find a matching sample
+                try:
+                    for sample in self.train_dataset:
+                        if target_class is None or extract_label(sample) == target_class:
+                            chosen_sample = sample
+                            break
+                except Exception:
+                    chosen_sample = None
+
+            if chosen_sample is None:
+                raise RuntimeError("Failed to select a sample for overfitting.")
+
+            # Store chosen class for logging/sampling alignment and propagate to config
+            self.chosen_overfit_class = extract_label(chosen_sample)
+            try:
+                # Mutate shared config so the module can see it
+                self.config["trainer"]["overfit_class"] = int(self.chosen_overfit_class) if self.chosen_overfit_class is not None else None
+            except Exception:
+                pass
+
+            class OverfitOneSampleDataset(Dataset):
+                def __init__(self, sample, length_hint: int | None = None):
+                    self.sample = sample
+                    self._length = length_hint if (isinstance(length_hint, int) and length_hint > 0) else 1_000_000
+
+                def __len__(self):
+                    return self._length
+
+                def __getitem__(self, idx):
+                    return self.sample
+
+            # Replace the training dataset with the constant-sample dataset
+            length_hint = None
+            try:
+                length_hint = len(self.train_dataset)
+            except Exception:
+                pass
+            self.train_dataset = OverfitOneSampleDataset(chosen_sample, length_hint)
     
     def train_dataloader(self):
         return DataLoader(
@@ -263,6 +355,10 @@ class RinLightningModule(LightningModule):
 
         self.image_height = rin_config["image_height"]
         self.image_width = rin_config["image_width"]
+
+        # Overfit mode controls (for sampling/logging)
+        self.overfit_one_sample = self.hparams["trainer"].get("overfit_one_sample", False)
+        self.overfit_class = self.hparams["trainer"].get("overfit_class", None)
     
     def forward(self, batch_img, pos_embs, batch_class, offsets, offsets_pos_embs, document_ids):
         return self.diffusion_model(batch_img, pos_embs, batch_class, offsets, offsets_pos_embs, document_ids)
@@ -272,6 +368,12 @@ class RinLightningModule(LightningModule):
         
         # batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw = batch
         batch_img, pos_embs, batch_class, offsets, offsets_pos_embs, document_ids = batch
+        # Capture overfit class from first batch if not set yet
+        if self.overfit_one_sample and self.overfit_class is None:
+            try:
+                self.overfit_class = int(batch_class[0].item())
+            except Exception:
+                pass
         batch_class = torch.nn.functional.one_hot(batch_class, num_classes=self.num_classes).float()
 
         # print(f'batch_img: {batch_img.shape}')
@@ -306,16 +408,17 @@ class RinLightningModule(LightningModule):
         # Generate samples
         if self.global_step % self.sample_every == 0:
             self.ema_diffusion_model.eval()
-            n = 2
-            samples = self.ema_diffusion_model.sample(num_samples=n * n, image_height=self.image_height, image_width=self.image_width, tape_dim=self.tape_dim, **self.sampling_kwargs)
+            n = 1 if self.overfit_one_sample else 2
+            class_override = self.overfit_class
+            samples = self.ema_diffusion_model.sample(num_samples=n * n, image_height=self.image_height, image_width=self.image_width, tape_dim=self.tape_dim, class_override=class_override, **self.sampling_kwargs)
             grid = torchvision.utils.make_grid(samples, nrow=n, normalize=True, value_range=(0, 1), padding=0)
             self.logger.experiment.log({"samples": [wandb.Image(grid)]}, step=self.global_step)
 
-            samples_horizontal = self.ema_diffusion_model.sample(num_samples=n * n, image_height=self.image_height // 2, image_width=self.image_width, tape_dim=self.tape_dim, **self.sampling_kwargs)
+            samples_horizontal = self.ema_diffusion_model.sample(num_samples=n * n, image_height=self.image_height // 2, image_width=self.image_width, tape_dim=self.tape_dim, class_override=class_override, **self.sampling_kwargs)
             grid_horizontal = torchvision.utils.make_grid(samples_horizontal, nrow=n, normalize=True, value_range=(0, 1), padding=0)
             self.logger.experiment.log({"samples_horizontal": [wandb.Image(grid_horizontal)]}, step=self.global_step)
 
-            samples_vertical = self.ema_diffusion_model.sample(num_samples=n * n, image_height=self.image_height, image_width=self.image_width // 2, tape_dim=self.tape_dim, **self.sampling_kwargs)
+            samples_vertical = self.ema_diffusion_model.sample(num_samples=n * n, image_height=self.image_height, image_width=self.image_width // 2, tape_dim=self.tape_dim, class_override=class_override, **self.sampling_kwargs)
             grid_vertical = torchvision.utils.make_grid(samples_vertical, nrow=n, normalize=True, value_range=(0, 1), padding=0)
             self.logger.experiment.log({"samples_vertical": [wandb.Image(grid_vertical)]}, step=self.global_step)
 
