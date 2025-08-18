@@ -4,6 +4,8 @@ import torch.nn as nn
 from .DropPath import DropPath
 from .MLP import MLP
 
+from .FlexMultiheadAttention import FlexMultiheadAttention
+
 
 class TransformerDecoderLayer(torch.nn.Module):
     def __init__(
@@ -30,11 +32,14 @@ class TransformerDecoderLayer(torch.nn.Module):
         
         if self_attention:
             self.self_ln = nn.LayerNorm(dim, eps=1e-6, elementwise_affine=ln_scale_shift)
-            self.self_mha = nn.MultiheadAttention(
-                dim, 
-                num_heads, 
-                dropout=drop_att,
-                batch_first=True
+            self.self_mha = FlexMultiheadAttention(
+                in_features=dim,
+                num_heads=num_heads,
+                out_features=dim,
+                key_features=dim,
+                value_features=dim,
+                num_kv_heads=num_heads,
+                embed_dim=dim,
             )
             
         if cross_attention:
@@ -112,7 +117,7 @@ class TransformerDecoderLayer(torch.nn.Module):
                 # Invert mask since PyTorch attention masks use True to indicate positions to mask
                 masks = ~masks.bool()
 
-            x_res, _ = self.cross_mha(query=x_ln, key=enc, value=enc, need_weights=False, attn_mask=masks)
+            x_res, _ = self.cross_mha(query=x_ln, key=enc, value=enc, attn_mask=masks)
             x = x + self.dropp(x_res)
             
         if self.use_mlp:

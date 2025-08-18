@@ -4,6 +4,8 @@ import torch.nn as nn
 from .DropPath import DropPath
 from .MLP import MLP
 
+from .FlexMultiheadAttention import FlexMultiheadAttention
+
 
 class TransformerEncoderLayer(torch.nn.Module):
     def __init__(
@@ -23,11 +25,14 @@ class TransformerEncoderLayer(torch.nn.Module):
         self.self_attention = self_attention
         if self_attention:
             self.mha_ln = nn.LayerNorm(dim, eps=1e-6, elementwise_affine=ln_scale_shift)
-            self.mha = nn.MultiheadAttention(
-                dim,
-                num_heads,
-                dropout=drop_att,
-                batch_first=True
+            self.mha = FlexMultiheadAttention(
+                in_features=dim,
+                num_heads=num_heads,
+                out_features=dim,
+                key_features=dim,
+                value_features=dim,
+                num_kv_heads=num_heads,
+                embed_dim=dim,
             )
 
         self.mlp = MLP(
@@ -45,7 +50,7 @@ class TransformerEncoderLayer(torch.nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.self_attention:
             x_ln = self.mha_ln(x)
-            x_residual, _ = self.mha(x_ln, x_ln, x_ln, need_weights=False)
+            x_residual, _ = self.mha(x_ln, x_ln, x_ln)
             x = x + self.dropp(x_residual)
         x = self.mlp(x)
         return x
