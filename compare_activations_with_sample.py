@@ -105,7 +105,7 @@ def main():
     parser = argparse.ArgumentParser(description='Compare activations using the sampling pipeline')
     parser.add_argument('ckpt_a', type=str)
     parser.add_argument('ckpt_b', type=str)
-    parser.add_argument('--config', type=str, default='sample_config.yaml')
+    parser.add_argument('--config', type=str, default='configs/cifar.yaml')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--num_samples', type=int, default=2)
     parser.add_argument('--iterations', type=int, default=1)
