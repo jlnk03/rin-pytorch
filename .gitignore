@@ -197,3 +197,4 @@ shape_mismatch.txt
 
 *.ckpt
 act_diffs.json
+compare_activations.json
