@@ -1,10 +1,86 @@
 import torch
 import torch.nn as nn
+from functools import lru_cache
+from torch.nn.attention.flex_attention import create_block_mask, BlockMask
 
 from .DropPath import DropPath
 from .MLP import MLP
-
 from .FlexMultiheadAttention import FlexMultiheadAttention
+
+create_block_mask = torch.compile(create_block_mask, dynamic=True)
+
+
+# @lru_cache
+# def create_block_mask_cached(score_mod, B, H, M, N, device):
+#     block_mask = create_block_mask(score_mod, B, H, M, N, device=device)
+#     return block_mask
+
+
+def create_document_block_mask(
+    latent_document_ids: torch.Tensor,
+    device: torch.device,
+) -> BlockMask:
+    """
+    Create a block mask for self-attention document masking using FlexAttention.
+    
+    Args:
+        latent_document_ids: Document IDs for each token, shape (seq_len,)
+        
+    Returns:
+        BlockMask for FlexAttention that restricts attention to same-document tokens
+    """
+    seq_len = latent_document_ids.shape[0]
+    
+    def _document_masking(
+        b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
+    ) -> torch.Tensor:
+        # Same document check: tokens can only attend to other tokens from same document
+        return latent_document_ids[q_idx] == latent_document_ids[kv_idx]
+    
+    # Create the block mask for FlexAttention
+    return create_block_mask(
+        mask_mod=_document_masking,
+        B=None,
+        H=None,
+        Q_LEN=seq_len,
+        KV_LEN=seq_len,
+        device=device,
+    )
+
+
+def create_cross_document_block_mask(
+    latent_document_ids: torch.Tensor,
+    document_ids: torch.Tensor,
+    device: torch.device,
+) -> BlockMask:
+    """
+    Create a block mask for cross-attention document masking using FlexAttention.
+    
+    Args:
+        latent_document_ids: Document IDs for query tokens (latent), shape (seq_len_q,)
+        document_ids: Document IDs for key/value tokens (input), shape (seq_len_kv,)
+        
+    Returns:
+        BlockMask for FlexAttention that restricts cross-attention to same-document tokens
+    """
+    seq_len_q = latent_document_ids.shape[0]
+    seq_len_kv = document_ids.shape[0]
+    
+    def _cross_document_masking(
+        b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
+    ) -> torch.Tensor:
+        # Cross document check: latent tokens can only attend to input tokens from same document
+        return latent_document_ids[q_idx] == document_ids[kv_idx]
+    
+    # Create the block mask for FlexAttention
+    return create_block_mask(
+        mask_mod=_cross_document_masking,
+        B=None,
+        H=None,
+        Q_LEN=seq_len_q,
+        KV_LEN=seq_len_kv,
+        device=device,
+    )
 
 
 class TransformerDecoderLayer(torch.nn.Module):
@@ -36,9 +112,6 @@ class TransformerDecoderLayer(torch.nn.Module):
                 in_features=dim,
                 num_heads=num_heads,
                 out_features=dim,
-                key_features=dim,
-                value_features=dim,
-                num_kv_heads=num_heads,
                 embed_dim=dim,
             )
             
@@ -58,13 +131,15 @@ class TransformerDecoderLayer(torch.nn.Module):
                 self.enc_ln = nn.Identity()
                 
             dim_x_att = dim if dim_x_att is None else dim_x_att
-            self.cross_mha = nn.MultiheadAttention(
-                embed_dim=dim,
+            
+            # Cross-attention Flex MHA supports different key/value features
+            self.cross_mha = FlexMultiheadAttention(
+                in_features=dim,
                 num_heads=num_heads,
-                kdim=dim_x_att,
-                vdim=dim_x_att,
-                dropout=drop_att,
-                batch_first=True,
+                out_features=dim,
+                key_features=dim_x_att,
+                value_features=dim_x_att,
+                embed_dim=dim,
             )
             
         if use_mlp:
@@ -83,41 +158,33 @@ class TransformerDecoderLayer(torch.nn.Module):
         self,
         x: torch.Tensor,
         enc: torch.Tensor,
-        masks: torch.Tensor | None = None,
+        # masks: torch.Tensor | None = None,
+        document_ids, latent_document_ids,
         mode: str | None = None,
     ) -> torch.Tensor:
         if self.self_attention:
             x_ln = self.self_ln(x)
-            x_res, _ = self.self_mha(x_ln, x_ln, x_ln, need_weights=False)
+            # Create document block mask for self-attention
+            block_mask = create_document_block_mask(latent_document_ids, device=x.device)
+            # Flex-only MHA
+            x_res, _ = self.self_mha(query=x_ln, key=x_ln, value=x_ln, block_mask=block_mask, attn_mask=None)
             x = x + self.dropp(x_res)
             
         if self.cross_attention:
             # print(mode)
             # print(f'x: {x.shape}, enc: {enc.shape}')
+            # print(f'type enc: {type(enc)}')
             x_ln = self.cross_ln(x)
             enc = self.enc_ln(enc)
-            # print(f'x_ln: {x_ln.shape}, enc: {enc.shape}')
-            # apply masks from var image sizes to cross attention only and not self attention
-            # x_res, _ = self.cross_mha(query=x_ln, key=enc, value=enc, need_weights=False, key_padding_mask=masks)
-            # Reshape mask to (batch_size, latent_len, image_len)
-            if masks is not None:
-                # print(f'masks: {masks.shape}')
-                # Get latent length from query tensor x_ln
-                if mode == "read":
-                    # Expand mask to include latent dimension
-                    latent_len = x_ln.shape[1]
-                    masks = masks.unsqueeze(1).expand(-1, latent_len, -1)
-                    # print(f'masks inserted: {masks.shape}')
-                    # print(f'masks sum latents: {masks.sum(dim=1)}')
-                else:
-                    latent_len = enc.shape[1]
-                    masks = masks.unsqueeze(2).expand(-1, -1, latent_len)
-                masks = masks.repeat_interleave(self.num_heads, dim=0)
-                # print(f'masks repeated: {masks.shape}')
-                # Invert mask since PyTorch attention masks use True to indicate positions to mask
-                masks = ~masks.bool()
 
-            x_res, _ = self.cross_mha(query=x_ln, key=enc, value=enc, attn_mask=masks)
+            # Ensure enc is [L, D] not [1, L, D]
+            if enc.ndim == 3:
+                enc = enc.squeeze(0)
+
+            # Create cross-document block mask
+            block_mask = create_cross_document_block_mask(latent_document_ids, document_ids, device=x.device)
+
+            x_res, _ = self.cross_mha(query=x_ln, key=enc, value=enc, block_mask=block_mask, attn_mask=None)
             x = x + self.dropp(x_res)
             
         if self.use_mlp:

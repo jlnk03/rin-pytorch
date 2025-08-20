@@ -6,7 +6,7 @@ from torch.nn.attention.flex_attention import flex_attention, BlockMask
 
 
 flex_compiled = torch.compile(
-    flex_attention
+    flex_attention, dynamic=True
 )
 
 

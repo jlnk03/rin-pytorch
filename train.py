@@ -36,8 +36,6 @@ def main():
     
     data_module = ImageNetDataModule(config)
     
-    model = RinLightningModule(config)
-    
     # Initialize WandB logger
     wandb_logger = WandbLogger(
         project="rin",
@@ -65,14 +63,17 @@ def main():
         logger=wandb_logger,
         callbacks=[checkpoint_callback, lr_monitor],
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
-        num_nodes= 2,
-        devices=4,
+        num_nodes= 1,
+        devices=1,
         precision="bf16" if config["trainer"]["fp16"] else "32",
         # gradient_clip_val=config["trainer"]["clip_grad_norm"],
         strategy='ddp_find_unused_parameters_true' if torch.cuda.device_count() > 1 else "auto",
         accumulate_grad_batches=1,
         log_every_n_steps=config["trainer"]["log_every_n_steps"],
     )
+
+    with trainer.init_module():
+        model = RinLightningModule(config)
     
     # Start training
     trainer.fit(model, datamodule=data_module, ckpt_path=args.resume_checkpoint)

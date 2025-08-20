@@ -6,19 +6,30 @@ from .modules import MLP, LambdaModule, ScalarEmbedding, TransformerDecoderLayer
 from .utils.pos_embedding import create_2d_sin_cos_pos_emb
 import torch.nn.functional as F
 from .utils.mask import downsample_mask
+from .utils.ragged_tensor import get_document_ids, ragged_list_to_tensor
+import numpy as np
 
 
 def _concat_tokens(*tokens: torch.Tensor | None) -> torch.Tensor:
     # tokens in shape [..., n, d]
     return torch.cat([t for t in tokens if t is not None], -2)
 
+# def patchify(x: torch.Tensor, p: int) -> torch.Tensor:
+#     # N, C, H, W -> N, T, D
+#     n, c, h, w = x.shape
+#     nh, nw = h // p, w // p
+#     x = x.view(n, c, nh, p, nw, p)
+#     x = x.permute(0, 2, 4, 3, 5, 1).contiguous()
+#     x = x.view(n, nh * nw, p * p * c)
+#     return x
+
 def patchify(x: torch.Tensor, p: int) -> torch.Tensor:
-    # N, C, H, W -> N, T, D
-    n, c, h, w = x.shape
+    # C, H, W -> T, D
+    c, h, w = x.shape
     nh, nw = h // p, w // p
-    x = x.view(n, c, nh, p, nw, p)
-    x = x.permute(0, 2, 4, 3, 5, 1).contiguous()
-    x = x.view(n, nh * nw, p * p * c)
+    x = x.view(c, nh, p, nw, p)
+    x = x.permute(1, 3, 2, 4, 0).contiguous()
+    x = x.view(nh * nw, p * p * c)
     return x
 
 class Rin(torch.nn.Module):
@@ -279,23 +290,24 @@ class Rin(torch.nn.Module):
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         if t is not None:
             t = self.time_emb(t, last_swish=False, normalize=True)
-            t = rearrange(t, "b d -> b 1 d")
+            # t = rearrange(t, "b d -> b 1 d")
         if cond is not None:
             cond = self.cond_proj(cond)
-            if cond.ndim == 2:
-                cond = rearrange(cond, "b d -> b 1 d")
+            # if cond.ndim == 2:
+            #     cond = rearrange(cond, "b d -> b 1 d")
         return t, cond
 
     def initialize_tape(
         self,
-        x: torch.Tensor,
-        masks: torch.Tensor,
-        time_emb: torch.Tensor | None,
-        cond: torch.Tensor | None,
-        pos_embs: torch.Tensor | None,
-        nmh: torch.Tensor | None,
-        nmw: torch.Tensor | None,
-        tape_prev: torch.Tensor | None,
+        # x: torch.Tensor,
+        # masks: torch.Tensor,
+        # time_emb: torch.Tensor | None,
+        # cond: torch.Tensor | None,
+        # pos_embs: torch.Tensor | None,
+        # nmh: torch.Tensor | None,
+        # nmw: torch.Tensor | None,
+        # tape_prev: torch.Tensor | None,
+        images_noised, time_emb, cond, pos_embs, tape_prev
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         tape_r = None
         # if not self._time_on_latent and time_emb is not None:
@@ -318,18 +330,17 @@ class Rin(torch.nn.Module):
         # print(f'x_init_2: {x.shape}')
         # x = rearrange(x, "b t d -> b d t")
         # print(f'x_init_3: {x.shape}')
-        tape = self.stem(x)
-        # print(f'tape_init: {tape.shape}')
+        tape = self.stem(images_noised)
         # tape = rearrange(tape, "b c (h w) -> b (h w) c", h=nmh, w=nmw)
         # print(f'tape_init: {tape.shape}')
         pos_embs = pos_embs.to(tape.device)
         tape = self.stem_ln(tape)
         tape += pos_embs
 
-        if self._self_cond in ["tape", "latent+tape"] and tape_prev is not None:
-            tape = tape + self.tape_prev_ln(self.tape_prev_proj(tape_prev))
-        if self._cond_tape_writable and tape_r is not None:
-            tape, tape_r = _concat_tokens(tape, tape_r), None
+        # if self._self_cond in ["tape", "latent+tape"] and tape_prev is not None:
+        #     tape = tape + self.tape_prev_ln(self.tape_prev_proj(tape_prev))
+        # if self._cond_tape_writable and tape_r is not None:
+        #     tape, tape_r = _concat_tokens(tape, tape_r), None
 
         return tape, tape_r
 
@@ -341,40 +352,60 @@ class Rin(torch.nn.Module):
         latent_prev: torch.Tensor | None,
     ) -> torch.Tensor:
         latent = self.latent_pos_emb
-        if self._latent_pos_encoding in ["sin_cos_plus_learned"]:
-            latent = latent + self.latent_pos_emb_res
+        # if self._latent_pos_encoding in ["sin_cos_plus_learned"]:
+        #     latent = latent + self.latent_pos_emb_res
         latent = latent.repeat(batch_size, 1, 1)
-        if self._time_on_latent and time_emb is not None:
-            latent = _concat_tokens(latent, time_emb)
+        # if self._time_on_latent and time_emb is not None:
+        #     latent = _concat_tokens(latent, time_emb)
         if self._cond_on_latent and cond is not None:
-            latent = _concat_tokens(latent, cond)
+            # print(f'latent: {latent.shape}')
+            # print(f'cond: {cond.shape}')
+            # latent = _concat_tokens(latent, cond)
+            # latent: [B, 127, 512]
+            # cond:   [B, 512]
+
+            cond_token = cond.unsqueeze(1)           # [B, 1, 512]
+            latent = torch.cat([latent, cond_token], dim=1)  # [B, 128, 512]
+
+        # Flatten batch and token dimensions into a single long sequence
+        # Resulting shape: [(batch_size * num_latent_tokens), latent_dim]
+        latent = rearrange(latent, "b n d -> (b n) d")
+
+        latent_offsets = torch.arange(0, batch_size + 1, device=latent.device, dtype=torch.int64) * self.latent_slots
+        
+        latent_document_ids = get_document_ids(latent_offsets)
+
         if self._self_cond in ["latent", "latent+tape"] and latent_prev is not None:
             latent = latent + \
                 self.latent_prev_ln(self.latent_prev_proj(latent_prev))
-        return latent
+        return latent, latent_document_ids
 
     def compute(
         self,
         latent: torch.Tensor,
         tape: torch.Tensor,
         tape_r: torch.Tensor | None,
-        masks: torch.Tensor | None = None,
+        # masks: torch.Tensor | None = None,
+        document_ids: torch.Tensor | None = None,
+        latent_document_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         for i in range(len(self._num_layers)):
             # pass masks to read and write units
-            if self._cond_decoupled_read:
-                latent = self.read_cond_units[i](latent, tape_r, masks, mode="read")
-                latent = self.read_units[i](latent, tape, masks, mode="read")
-            else:
-                tape_merged = _concat_tokens(tape, tape_r)
-                latent = self.read_units[i](latent, tape_merged, masks, mode="read")
+            # if self._cond_decoupled_read:
+            #     latent = self.read_cond_units[i](latent, tape_r, masks, mode="read")
+            #     latent = self.read_units[i](latent, tape, masks, mode="read")
+            # else:
+                # tape_merged = _concat_tokens(tape, tape_r)
+            latent = self.read_units[i](latent, tape, document_ids, latent_document_ids, mode="read")
             latent = self.latent_processing_units[i](latent)
-            tape = self.write_units[i](tape, latent, mode="write")
+            tape = self.write_units[i](tape, latent, latent_document_ids, document_ids, mode="write")
         return latent, tape
 
-    def readout_tape(self, tape: torch.Tensor, n_rows: int, n_cols: int) -> torch.Tensor:
+    def readout_tape(self, tape: torch.Tensor) -> torch.Tensor:
+        # tokens = self.output_linear(
+        #     self.output_ln(tape[:, : n_rows * n_cols]))
         tokens = self.output_linear(
-            self.output_ln(tape[:, : n_rows * n_cols]))
+            self.output_ln(tape))
         # tokens = rearrange(
         #     tokens,
         #     # "b (h w) (p1 p2 c) -> b (h p1 w p2) c",
@@ -390,6 +421,18 @@ class Rin(torch.nn.Module):
     @property
     def latent_shape(self) -> list[int]:
         return [self._latent_slots, self._latent_dim]
+
+    @property
+    def latent_dim(self) -> int:
+        return self._latent_dim
+
+    @property
+    def tape_dim(self) -> int:
+        return self._tape_dim
+
+    @property
+    def latent_slots(self) -> int:
+        return self._latent_slots
 
     @property
     def tape_shape(self) -> list[int]:
@@ -410,70 +453,110 @@ class Rin(torch.nn.Module):
         self.eval()
 
         # Create dummy data
-        dummy_image = torch.zeros([1, *self.image_shape], device=self.device)
-        dummy_image = patchify(dummy_image, self._patch_size)
-        # dummy_image = rearrange(dummy_image, "b c h w -> b c (h w)", h=self._image_height, w=self._image_width)
-        dummy_mask = torch.ones([1, self.image_shape[-2] // self._patch_size, self.image_shape[-1] // self._patch_size], device=self.device, dtype=torch.bool)
-        dummy_mask = rearrange(dummy_mask, "b h w -> b (h w)").float()
-        dummy_pos_embs = create_2d_sin_cos_pos_emb(
-            n_rows=self._n_rows,
-            n_cols=self._n_cols,
-            dim=self._tape_dim,
-        )
-        dummy_label = None
-        if num_classes is not None:
-            dummy_label = torch.zeros([1, num_classes], device=self.device)
+        # dummy_image = torch.zeros([2, *self.image_shape], device=self.device)
+        # dummy_image = patchify(dummy_image, self._patch_size)
+        # # dummy_image = rearrange(dummy_image, "b c h w -> b c (h w)", h=self._image_height, w=self._image_width)
+        # # dummy_mask = torch.ones([1, self.image_shape[-2] // self._patch_size, self.image_shape[-1] // self._patch_size], device=self.device, dtype=torch.bool)
+        # # dummy_mask = rearrange(dummy_mask, "b h w -> b (h w)").float()
+        # dummy_pos_embs = create_2d_sin_cos_pos_emb(
+        #     n_rows=self._n_rows,
+        #     n_cols=self._n_cols,
+        #     dim=self._tape_dim,
+        # )
+        # dummy_label = None
+        # if num_classes is not None:
+        #     dummy_label = torch.zeros([1, num_classes], device=self.device)
+
+        dummy_images = torch.zeros([2, *self.image_shape], device=self.device)
+
+        print(f'dummy_images: {dummy_images.shape}')
+        dummy_labels = torch.randint(0, num_classes, (2,), device=self.device)
+
+        patch_size = self._patch_size
+        tape_dim = self._tape_dim
+
+        padded_images = []
+        pos_emb_list = []
+        for img in dummy_images:
+            c, h, w = img.shape
+
+            h_crop = h - (h // patch_size) * patch_size
+            w_crop = w - (w // patch_size) * patch_size
+            
+            if h_crop > 0 or w_crop > 0:
+                img = img[:, :h - h_crop, :w - w_crop]
+                _, h, w = img.shape
+
+            if c == 1:
+                img = img.repeat(3, 1, 1)
+            
+            nh = h // patch_size
+            nw = w // patch_size
+            pixel_row = patchify(img, patch_size)
+            
+            pos_emb = create_2d_sin_cos_pos_emb(nh, nw, tape_dim)
+
+            padded_images.append(pixel_row)
+            pos_emb_list.append(pos_emb)
+
+        labels = torch.tensor(dummy_labels)
+        padded_images, offsets = ragged_list_to_tensor(padded_images)
+        # patch_masks = torch.stack(patch_masks).bool()
+        # image_masks = torch.stack(image_masks).bool()
+        pos_embs, offsets_pos_embs = ragged_list_to_tensor(pos_emb_list)
+
+        document_ids = get_document_ids(offsets)
+
+        batch_class = torch.nn.functional.one_hot(labels, num_classes=num_classes).float()
+
+        # time_step_shape = [padded_images.size(0)] + [1] * (padded_images.ndim - 1)
+        # t = torch.rand(time_step_shape, device=self.device)
+        t=0.0
 
         # Forward pass with dummy data
-        self(
-            x=dummy_image,
-            t=0.0,
-            cond=dummy_label,
-            masks=dummy_mask,
-            pos_embs=dummy_pos_embs,
-            nmh=self._n_rows,
-            nmw=self._n_cols,
-        )
+        self(padded_images, t, batch_class, offsets, document_ids, pos_embs)
 
         self.train(was_training)
 
     def forward(
         self,
-        x: torch.Tensor,
-        t: torch.Tensor | float,
-        masks: torch.Tensor | None = None,
-        cond: torch.Tensor | None = None,
-        pos_embs: torch.Tensor | None = None,
-        nmh: torch.Tensor | None = None,
-        nmw: torch.Tensor | None = None,
+        # x: torch.Tensor,
+        # t: torch.Tensor | float,
+        # masks: torch.Tensor | None = None,
+        # cond: torch.Tensor | None = None,
+        # pos_embs: torch.Tensor | None = None,
+        # nmh: torch.Tensor | None = None,
+        # nmw: torch.Tensor | None = None,
+        # latent_prev: torch.Tensor | None = None,
+        # tape_prev: torch.Tensor | None = None,
+        images_noised, t, batch_class, offsets, document_ids, pos_embs,
         latent_prev: torch.Tensor | None = None,
         tape_prev: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # assert x.ndim == 4
-        bs = x.shape[0]
-        # print(f'pos_embs_fwd_rin: {pos_embs.shape}')
+        bs = batch_class.shape[0]
         if isinstance(t, float) or t.ndim == 0:
-            t = torch.full((bs,), t, device=x.device, dtype=torch.float32)
+            t = torch.full((bs,), t, device=images_noised.device, dtype=torch.float32)
 
         if latent_prev is None:
-            latent_prev = torch.zeros(bs, *self.latent_shape, device=x.device)
+            latent_prev = torch.zeros(bs * self.latent_slots, self.latent_dim, device=images_noised.device)
 
         if tape_prev is None:
-            tape_prev = torch.zeros(bs, *self.tape_shape, device=x.device)
+            tape_prev = torch.zeros(bs * images_noised.shape[0], self.tape_dim, device=images_noised.device)
 
-        if self._cond_on_latent and cond is None:
+        if self._cond_on_latent and batch_class is None:
             raise ValueError("cond is None but cond_on_latent is True")
 
         # print(f'masks: {masks.shape}')
         # print(f'x: {x.shape}')
         # print(f'pos_embs: {pos_embs.shape}')
 
-        time_emb, cond = self.initialize_cond(t, cond)
+        time_emb, cond = self.initialize_cond(t, batch_class)
         tape, tape_r = self.initialize_tape(
-            x, masks, time_emb, cond, pos_embs, nmh, nmw, tape_prev)
-        latent = self.initialize_latent(bs, time_emb, cond, latent_prev)
-        latent, tape = self.compute(latent, tape, tape_r, masks)
-        x = self.readout_tape(tape, nmh, nmw)
+            images_noised, time_emb, cond, pos_embs, tape_prev)
+        latent, latent_document_ids = self.initialize_latent(bs, time_emb, cond, latent_prev)
+        latent, tape = self.compute(latent, tape, tape_r, document_ids, latent_document_ids)
+        x = self.readout_tape(tape)
         return x, latent, tape[:, : self._tape_slots]
 
     def load_weights_numpy(self, np_file):
