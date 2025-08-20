@@ -6,6 +6,7 @@ from .modules import MLP, LambdaModule, ScalarEmbedding, TransformerDecoderLayer
 from .utils.pos_embedding import create_2d_sin_cos_pos_emb
 import torch.nn.functional as F
 from .utils.mask import downsample_mask
+from .utils.logging_utils import log_first_tensor
 
 
 def _concat_tokens(*tokens: torch.Tensor | None) -> torch.Tensor:
@@ -298,6 +299,8 @@ class Rin(torch.nn.Module):
         tape_prev: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         tape_r = None
+        # Log input patches prior to any projection
+        log_first_tensor("rin.x_in", x[0])
         # if not self._time_on_latent and time_emb is not None:
         #     tape_r = time_emb
         if not self._cond_on_latent and cond is not None:
@@ -319,12 +322,14 @@ class Rin(torch.nn.Module):
         # x = rearrange(x, "b t d -> b d t")
         # print(f'x_init_3: {x.shape}')
         tape = self.stem(x)
+        log_first_tensor("rin.stem_out", tape[0])
         # print(f'tape_init: {tape.shape}')
         # tape = rearrange(tape, "b c (h w) -> b (h w) c", h=nmh, w=nmw)
         # print(f'tape_init: {tape.shape}')
         pos_embs = pos_embs.to(tape.device)
         tape = self.stem_ln(tape)
         tape += pos_embs
+        log_first_tensor("rin.tape_with_pos", tape[0])
 
         if self._self_cond in ["tape", "latent+tape"] and tape_prev is not None:
             tape = tape + self.tape_prev_ln(self.tape_prev_proj(tape_prev))
@@ -375,6 +380,7 @@ class Rin(torch.nn.Module):
     def readout_tape(self, tape: torch.Tensor, n_rows: int, n_cols: int) -> torch.Tensor:
         tokens = self.output_linear(
             self.output_ln(tape[:, : n_rows * n_cols]))
+        log_first_tensor("rin.readout_tokens", tokens[0])
         # tokens = rearrange(
         #     tokens,
         #     # "b (h w) (p1 p2 c) -> b (h p1 w p2) c",

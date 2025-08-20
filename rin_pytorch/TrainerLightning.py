@@ -23,6 +23,7 @@ from .utils.optimization_utils import (
     override_config_for_names,
 )
 from .utils.pos_embedding import create_2d_sin_cos_pos_emb
+from .utils.logging_utils import log_first_tensor
 
 import wandb
 
@@ -84,6 +85,7 @@ def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
     images = []
     labels = []
 
+    first_logged = False
     for example in batch:
         if example["image"].mode == "RGBA":
             print(f"Warning: Image has 4 channels (RGBA), converting to 3")
@@ -94,6 +96,9 @@ def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
         if c > 3:
             print(f"Warning: Image has {c} channels, truncating to 3")
             example["image"] = example["image"][:3]
+        if not first_logged:
+            log_first_tensor("dataloader.image_transformed", example["image"])
+            first_logged = True
         images.append(example["image"])
         labels.append(example["label"])
     
@@ -109,6 +114,7 @@ def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
     patch_masks = []
     image_masks = []
     pos_embs = []
+    first_logged2 = False
     for img in images:
         c, h, w = img.shape
 
@@ -123,11 +129,15 @@ def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
 
         if c == 1:
             img = img.repeat(3, 1, 1)
+        if not first_logged2:
+            log_first_tensor("dataloader.image_cropped", img)
         
         nh = h // patch_size
         nw = w // patch_size
         pixel_row = patchify(img, patch_size)
         pixel_row = pixel_row
+        if not first_logged2:
+            log_first_tensor("dataloader.image_patchified", pixel_row)
 
         pos_emb = create_2d_sin_cos_pos_emb(nh, nw, tape_dim)
 
@@ -136,6 +146,8 @@ def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
 
         # pad to max pixels
         pixel_row = torch.nn.functional.pad(pixel_row, (0, 0, 0, nmh * nmw - pixel_row.shape[0]), value=0)
+        if not first_logged2:
+            log_first_tensor("dataloader.image_padded", pixel_row)
         
         pixel_mask = torch.nn.functional.pad(pixel_mask, (0, max_pixels - pixel_mask.shape[0]), value=0)
         patch_mask = torch.nn.functional.pad(patch_mask, (0, nmh * nmw - patch_mask.shape[0]), value=0)
@@ -146,6 +158,8 @@ def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
 
         padded_images.append(pixel_row)
         pos_embs.append(pos_emb)
+        if not first_logged2:
+            first_logged2 = True
 
     # Convert labels to a tensor and move to GPU
     labels = torch.tensor(labels)
@@ -193,7 +207,8 @@ class ImageNetDataModule(LightningDataModule):
             pin_memory=True,
             persistent_workers=True,
             drop_last=True,
-            collate_fn=lambda batch: pad_to_max_size(batch, self.config["rin"]["patch_size"], self.config["rin"]["tape_dim"], self.transform)
+            collate_fn=lambda batch: pad_to_max_size(batch, self.config["rin"]["patch_size"], self.config["rin"]["tape_dim"], self.transform),
+            shuffle=False,
         )
 
 
@@ -268,6 +283,8 @@ class RinLightningModule(LightningModule):
         opt = self.optimizers()
         
         batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw = batch
+        # Log the padded/patchified batch input arriving to the trainer
+        log_first_tensor("trainer.batch_img_in", batch_img[0])
         batch_class = torch.nn.functional.one_hot(batch_class, num_classes=self.num_classes).float()
 
         opt.zero_grad()

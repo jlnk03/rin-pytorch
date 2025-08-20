@@ -10,6 +10,9 @@ from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import WandbLogger
 import argparse
 import yaml
+from rin_pytorch.utils.logging_utils import set_log_path
+
+pl.seed_everything(42, workers=True)
 
 torch.set_float32_matmul_precision('medium')
 
@@ -33,6 +36,11 @@ def main():
     # Optionally, update the checkpoint folder with a timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     config["trainer"]["checkpoint_folder"] = f"{config['trainer']['checkpoint_folder']}{config['trainer']['run_name']}_{timestamp}"
+
+    # Initialize first-sample trace log file
+    # trace_path = f"{config['trainer']['checkpoint_folder']}/first_image_trace.txt"
+    trace_path = f"/dss/dsshome1/0D/di38teq/Documents/rin-pytorch/first_image_trace.txt"
+    set_log_path(trace_path)
     
     data_module = ImageNetDataModule(config)
     
@@ -65,8 +73,8 @@ def main():
         logger=wandb_logger,
         callbacks=[checkpoint_callback, lr_monitor],
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
-        num_nodes= 2,
-        devices=4,
+        num_nodes= 1,
+        devices=1,
         precision="bf16" if config["trainer"]["fp16"] else "32",
         # gradient_clip_val=config["trainer"]["clip_grad_norm"],
         strategy='ddp_find_unused_parameters_true' if torch.cuda.device_count() > 1 else "auto",

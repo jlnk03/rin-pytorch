@@ -7,6 +7,7 @@ from einops import rearrange
 from .utils.mask import downsample_mask
 from .utils.pos_embedding import create_2d_sin_cos_pos_emb
 from torch.nn.functional import pad
+from rin_pytorch.utils.logging_utils import log_first_tensor
 
 def patchify(x: torch.Tensor, p: int) -> torch.Tensor:
     # N, C, H, W -> N, T, D
@@ -235,8 +236,12 @@ class RinDiffusionModel(torch.nn.Module):
         t: torch.Tensor | None = None,
     ):
 
+        # Log incoming images (patchified, [0,1])
+        log_first_tensor("diff.images_in", images)
         images = images * 2.0 - 1.0
+        log_first_tensor("diff.images_scaled", images[0])
         images_noised, noise, _, gamma = self.scheduler.add_noise(images, t=t)
+        log_first_tensor("diff.images_noised", images_noised[0])
         # print(f'pos_embs_noise_denoise: {pos_embs.shape}')
         # print(f'images_noised: {images_noised.shape}')
 
@@ -270,6 +275,12 @@ class RinDiffusionModel(torch.nn.Module):
         pred_dict = diffusion_utils.get_x0_eps(
             images_noised, gamma, denoise_out, self._pred_type, truncate_noise=False, clip_x0=True
         )
+        # Log predicted outputs on first item
+        if isinstance(pred_dict, dict):
+            if "data_pred" in pred_dict:
+                log_first_tensor("diff.data_pred", pred_dict["data_pred"][0])
+            if "noise_pred" in pred_dict:
+                log_first_tensor("diff.noise_pred", pred_dict["noise_pred"][0])
         return images, noise, images_noised, pred_dict
 
     def compute_loss(
@@ -313,9 +324,14 @@ class RinDiffusionModel(torch.nn.Module):
         # print(f'image_mask: {image_mask.shape}')
         # print(f'masks: {masks.shape}')
         # print(f'images: {images.shape}')
+        # Log before masking
+        log_first_tensor("diff.images_pre_mask", images[0])
         images = images[masks]
         noise = noise[masks]
         pred_dict["noise_pred"] = pred_dict["noise_pred"][masks]
         pred_dict["data_pred"] = pred_dict["data_pred"][masks]
+        # Log after masking
+        log_first_tensor("diff.images_masked", images[0])
+        log_first_tensor("diff.data_pred_masked", pred_dict["data_pred"][0])
         loss = self.compute_loss(images, noise, pred_dict)
         return loss
