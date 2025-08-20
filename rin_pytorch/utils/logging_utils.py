@@ -8,15 +8,16 @@ import torch.distributed as dist
 
 
 _LOG_PATH: str | None = None
+_DISABLE_LOGGING: bool = False
 
-
-def set_log_path(path: str) -> None:
+def set_log_path(path: str, disable_logging: bool = False) -> None:
     """Initialize the global log file path and truncate it.
 
     Creates parent directories if needed and clears any previous contents.
     Safe to call multiple times; later calls will reinitialize the file path.
     """
-    global _LOG_PATH
+    global _LOG_PATH, _DISABLE_LOGGING
+    _DISABLE_LOGGING = disable_logging
     _LOG_PATH = path
     parent = os.path.dirname(path)
     if parent and not os.path.exists(parent):
@@ -46,7 +47,7 @@ def log_first_tensor(tag: str, tensor: torch.Tensor | None, step: int | None = N
     - If tensor has a batch dimension, logs tensor[0]; otherwise logs tensor as-is.
     - Converts tensor to CPU float list for portability.
     """
-    if _LOG_PATH is None:
+    if _LOG_PATH is None or _DISABLE_LOGGING:
         return
     # Allow Dataloader worker 0 to log, otherwise only primary process
     worker = None
@@ -94,7 +95,7 @@ def log_first_document(tag: str, tensor: torch.Tensor | None, document_ids: torc
     Assumes `tensor` is flattened per-token (e.g., [total_tokens, dim]) and `document_ids`
     is a 1D tensor of length total_tokens mapping each token to its document index.
     """
-    if _LOG_PATH is None:
+    if _LOG_PATH is None or _DISABLE_LOGGING:
         return
     # Allow Dataloader worker 0 to log, otherwise only primary process
     worker = None
@@ -113,11 +114,8 @@ def log_first_document(tag: str, tensor: torch.Tensor | None, document_ids: torc
     try:
         # Ensure both tensors are on the same device
         doc_ids = document_ids
-        print(f"doc_ids: {doc_ids}")
         # Select first document (index 0)
         mask = (doc_ids == 0)
-        print(f"mask: {mask}")
-        print(f"tensor shape: {tensor.shape}")
 
         # If mask is empty, bail out silently
         if not torch.any(mask):

@@ -393,7 +393,7 @@ class Rin(torch.nn.Module):
             cond_tokens_per_sample = cond.shape[1]
             tokens_per_sample = actual_latent_slots_per_sample + cond_tokens_per_sample
 
-            print(f'latent: {latent.shape}, cond: {cond.shape}, actual_latent_slots_per_sample: {actual_latent_slots_per_sample}, cond_tokens_per_sample: {cond_tokens_per_sample}, tokens_per_sample: {tokens_per_sample}')
+            # print(f'latent: {latent.shape}, cond: {cond.shape}, actual_latent_slots_per_sample: {actual_latent_slots_per_sample}, cond_tokens_per_sample: {cond_tokens_per_sample}, tokens_per_sample: {tokens_per_sample}')
         else:
             tokens_per_sample = latent.shape[0] // batch_size
         

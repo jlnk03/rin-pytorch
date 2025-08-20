@@ -263,7 +263,19 @@ class RinDiffusionModel(torch.nn.Module):
         images = images * 2.0 - 1.0
         # Log scaled image for first document
         log_first_document("diff.images_scaled", images, document_ids)
-        images_noised, noise, _, gamma = self.scheduler.add_noise(images, t=t)
+        # Ensure timestep t is per-document and broadcast to tokens when packing
+        if t is None:
+            num_docs = labels.shape[0]
+            t_per_doc = torch.rand(num_docs, device=images.device)
+            t_tokens = t_per_doc[document_ids]
+        elif isinstance(t, torch.Tensor) and t.ndim == 1 and t.shape[0] == labels.shape[0]:
+            # t provided per-document; expand to tokens
+            t_tokens = t.to(device=images.device)[document_ids]
+        else:
+            # t is either a float or already token-aligned/broadcastable
+            t_tokens = t
+        images_noised, noise, _, gamma = self.scheduler.add_noise(images, t=t_tokens)
+        log_first_document("diff.noise", noise, document_ids)
         log_first_document("diff.images_noised", images_noised, document_ids)
         # print(f'pos_embs_noise_denoise: {pos_embs.shape}')
         # print(f'images_noised: {images_noised.shape}')
