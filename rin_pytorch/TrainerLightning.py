@@ -29,6 +29,7 @@ from .utils.optimization_utils import (
     override_config_for_names,
 )
 from .utils.pos_embedding import create_2d_sin_cos_pos_emb
+from .utils.logging_utils import log_first_tensor, log_first_document
 
 import wandb
 
@@ -113,25 +114,20 @@ def patchify(x: torch.Tensor, p: int) -> torch.Tensor:
 def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
     images = []
     labels = []
+    first_logged = False
     for example in batch:
-        # Normalize input to RGB and apply transform only when appropriate for the input type
-        img = example["image"]
-        # If PIL.Image, optionally convert RGBA->RGB and apply PIL-based transform pipeline
-        if isinstance(img, Image.Image):
-            if img.mode == "RGBA":
-                print(f"Warning: Image has 4 channels (RGBA), converting to 3")
-                img = img.convert("RGB")
-            if transform:
-                img = transform(img)
-        else:
-            # If already a Tensor, skip PIL-only transforms like ToTensor to avoid type errors
-            # Leave tensor as-is; downstream code expects CHW tensors
-            pass
-        example["image"] = img
+        if example["image"].mode == "RGBA":
+            print(f"Warning: Image has 4 channels (RGBA), converting to 3")
+            example["image"] = example["image"].convert("RGB")
+        if transform:
+            example["image"] = transform(example["image"])
         c, _, _ = example["image"].shape
         if c > 3:
             print(f"Warning: Image has {c} channels, truncating to 3")
             example["image"] = example["image"][:3]
+        if not first_logged:
+            log_first_tensor("dataloader.image_transformed", example["image"])
+            first_logged = True
         images.append(example["image"])
         labels.append(example["label"])
     
@@ -146,6 +142,7 @@ def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
     patch_masks = []
     image_masks = []
     pos_embs = []
+    first_logged2 = False
     for img in images:
         c, h, w = img.shape
 
@@ -159,9 +156,15 @@ def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
         if c == 1:
             img = img.repeat(3, 1, 1)
         
+        if not first_logged2:
+            log_first_tensor("dataloader.image_cropped", img)
+
         nh = h // patch_size
         nw = w // patch_size
         pixel_row = patchify(img, patch_size)
+
+        if not first_logged2:
+            log_first_tensor("dataloader.image_patchified", pixel_row)
         
         pos_emb = create_2d_sin_cos_pos_emb(nh, nw, tape_dim)
 
@@ -178,6 +181,9 @@ def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
         # patch_masks.append(patch_mask)
         padded_images.append(pixel_row)
         pos_embs.append(pos_emb)
+
+        if not first_logged2:
+            first_logged2 = True
 
     labels = torch.tensor(labels)
     padded_images, offsets = ragged_list_to_tensor(padded_images)
@@ -324,7 +330,8 @@ class ImageNetDataModule(LightningDataModule):
             pin_memory=True,
             persistent_workers=True,
             drop_last=True,
-            collate_fn=lambda batch: pad_to_max_size(batch, self.config["rin"]["patch_size"], self.config["rin"]["tape_dim"], self.transform)
+            collate_fn=lambda batch: pad_to_max_size(batch, self.config["rin"]["patch_size"], self.config["rin"]["tape_dim"], self.transform),
+            shuffle=False
         )
 
 
@@ -368,6 +375,8 @@ class RinLightningModule(LightningModule):
         
         # batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw = batch
         batch_img, pos_embs, batch_class, offsets, offsets_pos_embs, document_ids = batch
+        # Log only the first packed sample using document_ids
+        log_first_document("trainer.batch_img_in", batch_img, document_ids)
         # Capture overfit class from first batch if not set yet
         if self.overfit_one_sample and self.overfit_class is None:
             try:

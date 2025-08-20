@@ -201,3 +201,4 @@ shape_mismatch.txt
 act_diffs.json
 
 compare_activations.json
+*.txt

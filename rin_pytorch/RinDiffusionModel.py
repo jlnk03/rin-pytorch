@@ -9,6 +9,8 @@ from .utils.pos_embedding import create_2d_sin_cos_pos_emb
 from .utils.ragged_tensor import ragged_list_to_tensor, get_document_ids
 from torch.nn.functional import pad
 
+from rin_pytorch.utils.logging_utils import log_first_tensor, log_first_document
+
 def patchify(x: torch.Tensor, p: int) -> torch.Tensor:
     # N, C, H, W -> N, T, D
     n, c, h, w = x.shape
@@ -256,8 +258,13 @@ class RinDiffusionModel(torch.nn.Module):
         t: torch.Tensor | None = None,
     ):
 
+        # Log entire first packed sample (document 0)
+        log_first_document("diff.images_in", images, document_ids)
         images = images * 2.0 - 1.0
+        # Log scaled image for first document
+        log_first_document("diff.images_scaled", images, document_ids)
         images_noised, noise, _, gamma = self.scheduler.add_noise(images, t=t)
+        log_first_document("diff.images_noised", images_noised, document_ids)
         # print(f'pos_embs_noise_denoise: {pos_embs.shape}')
         # print(f'images_noised: {images_noised.shape}')
 
@@ -323,6 +330,14 @@ class RinDiffusionModel(torch.nn.Module):
         pred_dict = diffusion_utils.get_x0_eps(
             images_noised, gamma, denoise_out, self._pred_type, truncate_noise=False, clip_x0=True
         )
+
+        # Log predicted outputs on first item
+        if isinstance(pred_dict, dict):
+            if "data_pred" in pred_dict:
+                log_first_document("diff.data_pred", pred_dict["data_pred"], document_ids)
+            if "noise_pred" in pred_dict:
+                log_first_document("diff.noise_pred", pred_dict["noise_pred"], document_ids)
+
         return images, noise, images_noised, pred_dict
 
     def compute_loss(
@@ -371,5 +386,8 @@ class RinDiffusionModel(torch.nn.Module):
         # noise = noise[masks]
         # pred_dict["noise_pred"] = pred_dict["noise_pred"][masks]
         # pred_dict["data_pred"] = pred_dict["data_pred"][masks]
+        log_first_document("diff.images_pre_mask", images, document_ids)
+        log_first_document("diff.images_masked", images, document_ids)
+        log_first_document("diff.data_pred_masked", pred_dict["data_pred"], document_ids)
         loss = self.compute_loss(images, noise, pred_dict)
         return loss

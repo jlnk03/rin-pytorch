@@ -9,6 +9,8 @@ from .utils.mask import downsample_mask
 from .utils.ragged_tensor import get_document_ids
 import torch._dynamo
 
+from .utils.logging_utils import log_first_tensor, log_first_document
+
 
 def _concat_tokens(*tokens: torch.Tensor | None) -> torch.Tensor:
     # tokens in shape [..., n, d]
@@ -340,15 +342,21 @@ class Rin(torch.nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         tape_r = None
 
+        # x is flattened per-token; use document_ids to log first packed sample
+        log_first_document("rin.x_in", x, document_ids)
+
         # TODO: add cond
         # if not self._cond_on_latent and cond is not None:
         #     tape_r = _concat_tokens(tape_r, cond)
 
         tape = self.stem(x)
+        log_first_document("rin.stem_out", tape, document_ids)
 
         pos_embs = pos_embs.to(tape.device)
         tape = self.stem_ln(tape)
         tape += pos_embs
+        log_first_document("rin.tape_with_pos", tape, document_ids)
+
         # tape = tape + self.tape_pos_emb
 
         if self._self_cond in ["tape", "latent+tape"] and tape_prev is not None:
@@ -434,6 +442,10 @@ class Rin(torch.nn.Module):
     def readout_tape(self, tape: torch.Tensor) -> torch.Tensor:
         tokens = self.output_linear(
             self.output_ln(tape))
+
+        # tokens are per-token; log only the first document if available
+        # We cannot get document_ids here directly; this is best-effort logging using first token range
+        log_first_tensor("rin.readout_tokens", tokens)
         # tokens = rearrange(
         #     tokens,
         #     # "b (h w) (p1 p2 c) -> b (h p1 w p2) c",
