@@ -241,6 +241,7 @@ class RinDiffusionModel(torch.nn.Module):
         images = images * 2.0 - 1.0
         log_first_tensor("diff.images_scaled", images[0])
         images_noised, noise, _, gamma = self.scheduler.add_noise(images, t=t)
+        log_first_tensor("diff.noise", noise[0])
         log_first_tensor("diff.images_noised", images_noised[0])
         # print(f'pos_embs_noise_denoise: {pos_embs.shape}')
         # print(f'images_noised: {images_noised.shape}')
