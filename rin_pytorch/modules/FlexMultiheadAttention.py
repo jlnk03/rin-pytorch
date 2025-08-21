@@ -5,10 +5,10 @@ from typing import Optional, Tuple
 from torch.nn.attention.flex_attention import flex_attention, BlockMask
 
 
-flex_compiled = torch.compile(
-    flex_attention,
-    dynamic=True
-)
+# flex_compiled = torch.compile(
+#     flex_attention,
+#     dynamic=True
+# )
 
 
 def _expand_kv_heads(hidden_states: torch.Tensor, repeats_per_kv_head: int) -> torch.Tensor:
@@ -110,6 +110,11 @@ class FlexMultiheadAttention(torch.nn.Module):
         if self.out_proj.bias is not None:
             torch.nn.init.constant_(self.out_proj.bias, 0.0)
 
+        self.flex_compiled = torch.compile(
+            flex_attention,
+            dynamic=True
+        )
+
     def forward(
         self,
         query: torch.Tensor,
@@ -185,7 +190,7 @@ class FlexMultiheadAttention(torch.nn.Module):
             score_mod = _score_mod
 
         # Call FlexAttention
-        attn_output = flex_compiled(
+        attn_output = self.flex_compiled(
             query_states,
             key_states,
             value_states,
