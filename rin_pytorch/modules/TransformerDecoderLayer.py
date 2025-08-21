@@ -7,7 +7,7 @@ from .DropPath import DropPath
 from .MLP import MLP
 from .FlexMultiheadAttention import FlexMultiheadAttention
 
-create_block_mask = torch.compile(create_block_mask)
+create_block_mask = torch.compile(create_block_mask, dynamic=True)
 
 
 # @lru_cache
@@ -105,15 +105,6 @@ class TransformerDecoderLayer(torch.nn.Module):
         self.cross_attention = cross_attention
         self.use_mlp = use_mlp
         self.num_heads = num_heads
-        
-        if self_attention:
-            self.self_ln = nn.LayerNorm(dim, eps=1e-6, elementwise_affine=ln_scale_shift)
-            self.self_mha = FlexMultiheadAttention(
-                in_features=dim,
-                num_heads=num_heads,
-                out_features=dim,
-                embed_dim=dim,
-            )
             
         if cross_attention:
             self.cross_ln = nn.LayerNorm(
@@ -162,13 +153,14 @@ class TransformerDecoderLayer(torch.nn.Module):
         document_ids, latent_document_ids,
         mode: str | None = None,
     ) -> torch.Tensor:
-        if self.self_attention:
-            x_ln = self.self_ln(x)
-            # Create document block mask for self-attention
-            block_mask = create_document_block_mask(latent_document_ids, device=x.device)
-            # Flex-only MHA
-            x_res, _ = self.self_mha(query=x_ln, key=x_ln, value=x_ln, block_mask=block_mask, attn_mask=None)
-            x = x + self.dropp(x_res)
+        # Validate x and latent_document_ids before creating any block masks
+        assert (
+            x.shape[0] == latent_document_ids.shape[0]
+        ), f"x and latent_document_ids must have same seq length. Got x={x.shape[0]}, latent_document_ids={latent_document_ids.shape[0]}"
+
+        assert (
+            x.device == latent_document_ids.device
+        ), f"x and latent_document_ids must be on the same device. Got x={x.device}, latent_document_ids={latent_document_ids.device}"
             
         if self.cross_attention:
             # print(mode)
@@ -180,6 +172,15 @@ class TransformerDecoderLayer(torch.nn.Module):
             # Ensure enc is [L, D] not [1, L, D]
             if enc.ndim == 3:
                 enc = enc.squeeze(0)
+
+            # Validate enc and document_ids before creating cross-attention block mask
+            assert (
+                enc.shape[0] == document_ids.shape[0]
+            ), f"enc and document_ids must have same seq length. Got enc={enc.shape[0]}, document_ids={document_ids.shape[0]}"
+
+            assert (
+                enc.device == document_ids.device
+            ), f"enc and document_ids must be on the same device. Got enc={enc.device}, document_ids={document_ids.device}"
 
             # Create cross-document block mask
             block_mask = create_cross_document_block_mask(latent_document_ids, document_ids, device=x.device)
