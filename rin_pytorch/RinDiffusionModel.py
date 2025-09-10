@@ -108,7 +108,7 @@ class RinDiffusionModel(torch.nn.Module):
         nmh = image_shape[1] // patch_size
         nmw = image_shape[2] // patch_size
 
-        print(f'num classes: {self._num_classes}')
+        # print(f'num classes: {self._num_classes}')
 
         # Prepare class-conditional input if needed
         if self._conditional == "class":
@@ -247,13 +247,6 @@ class RinDiffusionModel(torch.nn.Module):
 
     def noise_denoise(
         self,
-        # images: torch.Tensor,
-        # masks: torch.Tensor,
-        # labels: torch.Tensor,
-        # pos_embs: torch.Tensor,
-        # nmh: torch.Tensor,
-        # nmw: torch.Tensor,
-        # t: torch.Tensor | None = None,
         images, pos_embs, labels, offsets, offsets_pos_embs, document_ids,
         t: torch.Tensor | None = None,
     ):
@@ -277,21 +270,15 @@ class RinDiffusionModel(torch.nn.Module):
         images_noised, noise, _, gamma = self.scheduler.add_noise(images, t=t_tokens)
         log_first_document("diff.noise", noise, document_ids)
         log_first_document("diff.images_noised", images_noised, document_ids)
-        # print(f'pos_embs_noise_denoise: {pos_embs.shape}')
-        # print(f'images_noised: {images_noised.shape}')
 
-        # bsz = images.size(0)
         bsz = labels.shape[0]
-        # latent_prev = torch.zeros((bsz, *self.denoiser.latent_shape), device=images.device)
-        # tape_prev = torch.zeros((bsz, *self.denoiser.tape_shape), device=images.device)
-        # latent_prev = torch.zeros((bsz, *self.denoiser.latent_shape), device=images.device)
+
         tape_length = images_noised.shape[0]
         tape_prev = torch.zeros((tape_length, self.denoiser.tape_dim), device=images.device)
         latent_length = bsz * self.denoiser._latent_slots
         latent_prev = torch.zeros((latent_length, self.denoiser.latent_dim), device=images.device)
 
         if self._self_cond != "none" and self._self_cond_rate > 0.0:
-            print(f'self_cond: {self._self_cond}')
             # Create document-level mask
             doc_mask = torch.rand(bsz, device=images.device) < self._self_cond_rate
 
@@ -300,38 +287,9 @@ class RinDiffusionModel(torch.nn.Module):
             log_first_document("diff.tape_prev", tape_prev, document_ids)
 
             if torch.any(doc_mask):
-                # For simplicity, process all data but only update the masked documents
-                # This avoids the complexity of recomputing offsets for subsets
-
-                # Expand document-level mask to patch-level and latent-level masks
-                # patch_mask = doc_mask[document_ids]  # [total_patches]
-                # latent_mask = torch.repeat_interleave(doc_mask, self.denoiser._latent_slots)  # [bsz * latent_slots]
-                # print(f'latent_mask: {latent_mask.shape}')
-                # print(f'patch_mask: {patch_mask.shape}')
-
-                # print(f'images_noised: {images_noised.shape}')
-                # print(f'images noised mask: {images_noised[patch_mask].shape}')
-                # print(f'latent masked: {latent_prev[latent_mask].shape}')
                 
                 with torch.no_grad():
                     _, latent_prev_out, tape_prev_out = self.denoise(
-                        # x=images_noised[mask],
-                        # gamma=gamma[mask],
-                        # cond=labels[mask],
-                        # masks=masks[mask],
-                        # pos_embs=pos_embs[mask],
-                        # nmh=nmh,
-                        # nmw=nmw,
-
-                        # images_noised[patch_mask],
-                        # gamma[patch_mask],
-                        # labels[doc_mask],
-                        # pos_embs[patch_mask],
-                        # offsets,
-                        # offsets_pos_embs,
-                        # document_ids[patch_mask],
-                        # latent_prev[latent_mask],
-                        # tape_prev[patch_mask]
 
                         images_noised,
                         gamma,
@@ -344,21 +302,15 @@ class RinDiffusionModel(torch.nn.Module):
                         tape_prev
                     )
 
-                # Update only the selected documents
-                # latent_prev[latent_mask] = latent_prev_out.detach()
-                # tape_prev[patch_mask] = tape_prev_out.detach()
-
                 latent_prev = latent_prev_out.detach()
                 tape_prev = tape_prev_out.detach()
-                print(f'latent_prev: {latent_prev.shape}')
+                # print(f'latent_prev: {latent_prev.shape}')
                 log_first_document("diff.latent_prev_out", latent_prev_out, document_ids)
                 log_first_document("diff.tape_prev_out", tape_prev_out, document_ids)
 
         # pass masks to denoise
         denoise_out, _, _ = self.denoise(images_noised, gamma, labels, pos_embs, offsets, offsets_pos_embs, document_ids, latent_prev, tape_prev)
-        # print(f'denoise_out: {denoise_out.shape}')
-        # print(f'gamma: {gamma.shape}')
-        # print(f'images_noised: {images_noised.shape}')
+
         pred_dict = diffusion_utils.get_x0_eps(
             images_noised, gamma, denoise_out, self._pred_type, truncate_noise=False, clip_x0=True
         )
@@ -388,36 +340,11 @@ class RinDiffusionModel(torch.nn.Module):
 
     def forward(
         self,
-        # images: torch.Tensor,
-        # masks: torch.Tensor,
-        # image_mask: torch.Tensor,
-        # labels: torch.Tensor,
-        # pos_embs: torch.Tensor,
-        # nmh: torch.Tensor,
-        # nmw: torch.Tensor,
-        # t: torch.Tensor | None = None,
         images, pos_embs, labels, offsets, offsets_pos_embs, document_ids
     ) -> torch.Tensor:
-        # print(f'pos_embs_fwd_diff: {pos_embs.shape}')
-        # print(f'nmh: {nmh}')
-        # print(f'nmw: {nmw}')
-        # print(f'images_init: {images.shape}')
-        # print(f'masks: {masks.shape}')
-        # print(f'image_masks: {image_mask.shape}')
-        images, noise, _, pred_dict = self.noise_denoise(images, pos_embs, labels, offsets, offsets_pos_embs, document_ids)
-        # print(f'images: {images.shape}')
-        # print(f'noise: {noise.shape}')
-        # print(f'pred_noise: {pred_dict["noise_pred"].shape}')
 
-        # image_mask = image_mask.unsqueeze(-1)  # Add channel dim
-        # image_mask = image_mask.expand(-1, 3, -1, -1)  # Expand across all 3 channels
-        # print(f'image_mask: {image_mask.shape}')
-        # print(f'masks: {masks.shape}')
-        # print(f'images: {images.shape}')
-        # images = images[masks]
-        # noise = noise[masks]
-        # pred_dict["noise_pred"] = pred_dict["noise_pred"][masks]
-        # pred_dict["data_pred"] = pred_dict["data_pred"][masks]
+        images, noise, _, pred_dict = self.noise_denoise(images, pos_embs, labels, offsets, offsets_pos_embs, document_ids)
+
         log_first_document("diff.images_pre_mask", images, document_ids)
         log_first_document("diff.images_masked", images, document_ids)
         log_first_document("diff.data_pred_masked", pred_dict["data_pred"], document_ids)

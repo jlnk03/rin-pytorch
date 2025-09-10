@@ -131,16 +131,7 @@ def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
         images.append(example["image"])
         labels.append(example["label"])
     
-    max_height = max(img.shape[1] for img in images)
-    max_width = max(img.shape[2] for img in images)
-
-    max_pixels = max_height * max_width
-    nmh = max_height // patch_size
-    nmw = max_width // patch_size
-    
     padded_images = []
-    patch_masks = []
-    image_masks = []
     pos_embs = []
     first_logged2 = False
     for img in images:
@@ -168,17 +159,6 @@ def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
         
         pos_emb = create_2d_sin_cos_pos_emb(nh, nw, tape_dim)
 
-        # pixel_mask = torch.ones(h * w)
-        # patch_mask = torch.ones(nh * nw)
-
-        # Pad to max tokens / max patches for consistency across the batch
-        # pixel_row = torch.nn.functional.pad(pixel_row, (0, 0, 0, nmh * nmw - pixel_row.shape[0]), value=0)
-        # pixel_mask = torch.nn.functional.pad(pixel_mask, (0, max_pixels - pixel_mask.shape[0]), value=0)
-        # patch_mask = torch.nn.functional.pad(patch_mask, (0, nmh * nmw - patch_mask.shape[0]), value=0)
-        # pos_emb = torch.nn.functional.pad(pos_emb, (0, 0, 0, nmh * nmw - pos_emb.shape[0]), value=0)
-        
-        # image_masks.append(pixel_mask)
-        # patch_masks.append(patch_mask)
         padded_images.append(pixel_row)
         pos_embs.append(pos_emb)
 
@@ -187,29 +167,10 @@ def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
 
     labels = torch.tensor(labels)
     padded_images, offsets = ragged_list_to_tensor(padded_images)
-    # patch_masks = torch.stack(patch_masks).bool()
-    # image_masks = torch.stack(image_masks).bool()
+
     pos_embs, offsets_pos_embs = ragged_list_to_tensor(pos_embs)
 
     document_ids = get_document_ids(offsets)
-
-    # _, token_mask = create_random_token_mask(padded_images, mask_ratio=0.3)
-    
-    # visible_padded_images = []
-    # visible_patch_masks = []
-    # visible_pos_embs = []
-    # for i, (padded_image, patch_mask, pos_emb) in enumerate(zip(padded_images, patch_masks, pos_embs)):
-    #     # print(token_mask[i])
-    #     visible_idx = ~token_mask[i]
-    #     visible_padded_images.append(padded_image[visible_idx])
-    #     visible_patch_masks.append(patch_mask[visible_idx])
-    #     visible_pos_embs.append(pos_emb[visible_idx])
-    
-    # visible_padded_images = torch.stack(visible_padded_images)
-    # visible_patch_masks = torch.stack(visible_patch_masks)
-    # visible_pos_embs = torch.stack(visible_pos_embs)
-
-    # print(f'visible_padded_images.shape: {visible_padded_images.shape}')
     
     return padded_images, pos_embs, labels, offsets, offsets_pos_embs, document_ids
 
@@ -331,7 +292,7 @@ class ImageNetDataModule(LightningDataModule):
             persistent_workers=True,
             drop_last=True,
             collate_fn=lambda batch: pad_to_max_size(batch, self.config["rin"]["patch_size"], self.config["rin"]["tape_dim"], self.transform),
-            shuffle=False
+            # shuffle=False
         )
 
 
@@ -385,27 +346,79 @@ class RinLightningModule(LightningModule):
                 pass
         batch_class = torch.nn.functional.one_hot(batch_class, num_classes=self.num_classes).float()
 
-        # print(f'batch_img: {batch_img.shape}')
-        # print(f'pos_embs: {pos_embs.shape}')
-        # print(f'batch_class: {batch_class.shape}')
-        # print(f'offsets: {offsets.shape}')
-        # print(f'offsets_pos_embs: {offsets_pos_embs.shape}')
-        # print(f'document_ids: {document_ids.shape}')
-
         opt.zero_grad()
-        loss = self(batch_img, pos_embs, batch_class, offsets, offsets_pos_embs, document_ids)
-        self.manual_backward(loss)
+        # Optional FLOPs profiling on first step (forward and backward separated)
+        if self.hparams["trainer"].get("profile_flops", False) and self.global_step == 0:
+            activities = [torch.profiler.ProfilerActivity.CPU]
+            if torch.cuda.is_available():
+                activities.append(torch.profiler.ProfilerActivity.CUDA)
+                torch.cuda.synchronize()
+
+            # Profile forward pass
+            with torch.profiler.profile(activities=activities, with_flops=True) as prof_fwd:
+                loss = self(batch_img, pos_embs, batch_class, offsets, offsets_pos_embs, document_ids)
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            fwd_flops = sum(getattr(ev, "flops", 0) for ev in prof_fwd.key_averages())
+
+            # Profile backward pass
+            with torch.profiler.profile(activities=activities, with_flops=True) as prof_bwd:
+                self.manual_backward(loss)
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            bwd_flops = sum(getattr(ev, "flops", 0) for ev in prof_bwd.key_averages())
+
+            step_total_flops = float(fwd_flops + bwd_flops)
+
+            print(f"FLOPs/forward_total: {fwd_flops}")
+            print(f"FLOPs/backward_total: {bwd_flops}")
+            print(f"FLOPs/step_total: {step_total_flops}")
+            print(f"FLOPs/forward_G: {fwd_flops / 1e9}")
+            print(f"FLOPs/backward_G: {bwd_flops / 1e9}")
+            print(f"FLOPs/step_G: {step_total_flops / 1e9}")
+
+            try:
+                if isinstance(self.logger, WandbLogger):
+                    self.logger.experiment.summary["FLOPs/forward_total"] = int(fwd_flops)
+                    self.logger.experiment.summary["FLOPs/backward_total"] = int(bwd_flops)
+                    self.logger.experiment.summary["FLOPs/step_total"] = int(step_total_flops)
+                    self.logger.experiment.summary["FLOPs/forward_G"] = float(fwd_flops) / 1e9
+                    self.logger.experiment.summary["FLOPs/backward_G"] = float(bwd_flops) / 1e9
+                    self.logger.experiment.summary["FLOPs/step_G"] = step_total_flops / 1e9
+            except Exception:
+                pass
+        else:
+            loss = self(batch_img, pos_embs, batch_class, offsets, offsets_pos_embs, document_ids)
+            self.manual_backward(loss)
+
         opt.step()
 
         sch = self.lr_schedulers()
         sch.step()
 
-        logs = {
-            "loss": loss.item(),
-            "lr": sch.get_last_lr()[0],
-        }
+        # logs = {
+        #     "loss": loss.item(),
+        #     "lr": sch.get_last_lr()[0],
+        # }
 
-        self.log_dict(logs, on_step=True, prog_bar=True)
+        # logs = {
+        #     "loss": 1,
+        #     "lr": 1,
+        # }
+
+        # self.log_dict(logs, on_step=True, prog_bar=True)
+
+                # logs = {
+        #     "loss": loss.item(),
+        #     "lr": sch.get_last_lr()[0],
+        # }
+
+        # Prefer: log tensors to avoid graph breaks; LR is handled by LearningRateMonitor
+        self.log("loss", loss.detach(), on_step=True, prog_bar=True, logger=True)
+
+        # If you still want to log LR yourself, convert to a tensor (optional)
+        # lr_tensor = torch.tensor(sch.get_last_lr()[0], device=loss.device)
+        # self.log("lr", lr_tensor, on_step=True, prog_bar=False, logger=True)
 
         # Update EMA model
         if self.global_step % self.ema_update_every == 0:
@@ -417,7 +430,7 @@ class RinLightningModule(LightningModule):
         # Generate samples
         if self.global_step % self.sample_every == 0:
             self.ema_diffusion_model.eval()
-            n = 1 if self.overfit_one_sample else 2
+            n = 1 if self.overfit_one_sample else 8
             class_override = self.overfit_class
             samples = self.ema_diffusion_model.sample(num_samples=n * n, image_height=self.image_height, image_width=self.image_width, tape_dim=self.tape_dim, class_override=class_override, **self.sampling_kwargs)
             grid = torchvision.utils.make_grid(samples, nrow=n, normalize=True, value_range=(0, 1), padding=0)

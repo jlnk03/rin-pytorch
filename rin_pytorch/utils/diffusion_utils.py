@@ -56,7 +56,8 @@ class Scheduler:
             t = t.reshape(time_step_shape)
 
         gamma = self.time_transform(t)
-        noise = self.sample_noise(inputs.shape, device=device)
+        # Avoid symbolic shape issues under torch.compile by using randn_like
+        noise = torch.randn_like(inputs)
         inputs_noised = inputs * torch.sqrt(gamma) + noise * torch.sqrt(1 - gamma)
 
         return inputs_noised, noise, t.squeeze(), gamma
@@ -82,7 +83,8 @@ class Scheduler:
                 var_t = torch.exp(torch.log1p(-gamma_prev) - torch.log1p(-gamma_now)) * (1.0 - alpha_t)
             else:
                 raise ValueError(f"Unknown ddpm_var_type {ddpm_var_type}")
-            eps = self.sample_noise(data_pred.shape, device=data_pred.device)
+            # Avoid symbolic shape issues under torch.compile by using randn_like
+            eps = torch.randn_like(data_pred)
             samples = x_mean + torch.sqrt(var_t) * eps
         return samples
 

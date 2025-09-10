@@ -110,10 +110,10 @@ class FlexMultiheadAttention(torch.nn.Module):
         if self.out_proj.bias is not None:
             torch.nn.init.constant_(self.out_proj.bias, 0.0)
 
-        self.flex_compiled = torch.compile(
-            flex_attention,
-            dynamic=True
-        )
+        # self.flex_compiled = torch.compile(
+        #     flex_attention,
+        #     dynamic=True
+        # )
 
     def forward(
         self,
@@ -190,7 +190,7 @@ class FlexMultiheadAttention(torch.nn.Module):
             score_mod = _score_mod
 
         # Call FlexAttention
-        attn_output = self.flex_compiled(
+        attn_output = flex_attention(
             query_states,
             key_states,
             value_states,

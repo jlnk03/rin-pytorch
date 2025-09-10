@@ -7,6 +7,8 @@ from .DropPath import DropPath
 from .MLP import MLP
 from .FlexMultiheadAttention import FlexMultiheadAttention
 
+# create_block_mask = torch.compile(create_block_mask, dynamic=True)
+
 # @lru_cache
 # def create_block_mask_cached(score_mod, B, H, M, N, device):
 #     block_mask = create_block_mask(score_mod, B, H, M, N, device=device)

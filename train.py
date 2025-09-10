@@ -12,10 +12,20 @@ import argparse
 import yaml
 from rin_pytorch.utils.logging_utils import set_log_path
 
+torch._dynamo.config.recompile_limit = 16
+# torch._dynamo.explain()
+# torch._dynamo.config.capture_scalar_outputs = True
+
 from dotenv import load_dotenv
 load_dotenv()
 
-pl.seed_everything(42, workers=True)
+import os
+
+os.environ["TORCH_LOGS"] = "recompiles"
+os.environ["TORCHDYNAMO_VERBOSE"] = "1"
+
+
+# pl.seed_everything(42, workers=True)
 
 torch.set_float32_matmul_precision('medium')
 
@@ -43,7 +53,7 @@ def main():
     # Initialize first-sample trace log file
     # trace_path = f"{config['trainer']['checkpoint_folder']}/first_image_trace.txt"
     trace_path = f"/dss/dsshome1/0D/di38teq/Documents/rin-pytorch/first_image_trace.txt"
-    set_log_path(trace_path, disable_logging=False)
+    set_log_path(trace_path, disable_logging=True)
     
     data_module = ImageNetDataModule(config)
     
@@ -74,8 +84,8 @@ def main():
         logger=wandb_logger,
         callbacks=[checkpoint_callback, lr_monitor],
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
-        num_nodes= 1,
-        devices=1,
+        num_nodes= 4,
+        devices=4,
         precision="bf16" if config["trainer"]["fp16"] else "32",
         # gradient_clip_val=config["trainer"]["clip_grad_norm"],
         strategy='ddp_find_unused_parameters_true' if torch.cuda.device_count() > 1 else "auto",
@@ -84,7 +94,14 @@ def main():
     )
 
     with trainer.init_module():
+        print("Initializing model")
+        print(torch.cuda.is_available())
+        # model = RinLightningModule(config)
         model = RinLightningModule(config)
+
+    if torch.cuda.is_available():
+        print("Compiling model")
+        model = torch.compile(model, dynamic=True)
     
     # Start training
     trainer.fit(model, datamodule=data_module, ckpt_path=args.resume_checkpoint)
