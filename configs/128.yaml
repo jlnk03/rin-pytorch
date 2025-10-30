@@ -63,6 +63,7 @@ trainer:
   run_name: "imagenet_nested_self_cond"
   log_to_wandb: true
   log_every_n_steps: 10
+  profile_flops: true
 
 run:
   vanilla: false

@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import torchvision
 from torch.utils.data import DataLoader, Dataset, IterableDataset
 from torchvision import transforms
@@ -37,6 +38,8 @@ import os
 from dotenv import load_dotenv
 
 from diffusers.optimization import get_scheduler as get_lr_scheduler
+
+from torchmetrics.image.fid import FrechetInceptionDistance
 
 load_dotenv()
 
@@ -111,7 +114,7 @@ def patchify(x: torch.Tensor, p: int) -> torch.Tensor:
     return x
 
 
-def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
+def pad_to_max_size(batch, patch_size, tape_dim, transform=None, return_padded_images_for_fid=False):
     images = []
     labels = []
     first_logged = False
@@ -134,6 +137,7 @@ def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
     padded_images = []
     pos_embs = []
     first_logged2 = False
+    fid_images_for_batch = []
     for img in images:
         c, h, w = img.shape
 
@@ -162,6 +166,9 @@ def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
         padded_images.append(pixel_row)
         pos_embs.append(pos_emb)
 
+        if return_padded_images_for_fid:
+            fid_images_for_batch.append(img)
+
         if not first_logged2:
             first_logged2 = True
 
@@ -171,7 +178,19 @@ def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
     pos_embs, offsets_pos_embs = ragged_list_to_tensor(pos_embs)
 
     document_ids = get_document_ids(offsets)
-    
+
+    if return_padded_images_for_fid and len(fid_images_for_batch) > 0:
+        max_h = max(x.shape[1] for x in fid_images_for_batch)
+        max_w = max(x.shape[2] for x in fid_images_for_batch)
+        fid_padded = []
+        for x in fid_images_for_batch:
+            pad_h = max_h - x.shape[1]
+            pad_w = max_w - x.shape[2]
+            x = F.pad(x, (0, pad_w, 0, pad_h), value=0.0)
+            fid_padded.append(x)
+        fid_batch = torch.stack(fid_padded, dim=0)
+        return padded_images, pos_embs, labels, offsets, offsets_pos_embs, document_ids, fid_batch
+
     return padded_images, pos_embs, labels, offsets, offsets_pos_embs, document_ids
 
 
@@ -192,6 +211,7 @@ class ImageNetDataModule(LightningDataModule):
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
             ])
+        # Validation will use the exact same transform via collate_fn; datasets return PIL
     
     def setup(self, stage=None):
         if self.config["run"]["cifar"]: 
@@ -204,6 +224,33 @@ class ImageNetDataModule(LightningDataModule):
                 split='train',
                 # transform=self.transform
             )
+
+        # Validation datasets
+        if stage in (None, "fit", "validate"):
+            if self.config["run"]["cifar"]:
+                self.val_dataset = FlexibleCIFAR10(
+                    "datasets/cifar10_flex",
+                    train=False,
+                )
+            else:
+                try:
+                    ds_val = load_dataset("imagenet-1k", split="validation", trust_remote_code=True)
+                except Exception as e:
+                    print(e)
+                    ds_val = None
+
+                class HFVal(Dataset):
+                    def __init__(self, ds):
+                        self.ds = ds
+                    def __len__(self):
+                        return 0 if self.ds is None else len(self.ds)
+                    def __getitem__(self, idx):
+                        s = self.ds[idx]
+                        img = s["image"].convert("RGB")
+                        # Return PIL image; collate_fn will apply transforms identically to train
+                        return {"image": img, "label": s.get("label", -1)}
+
+                self.val_dataset = HFVal(ds_val)
 
         # Optionally wrap to overfit on a single sample from a random (or specified) class
         if self.overfit_one_sample:
@@ -295,6 +342,25 @@ class ImageNetDataModule(LightningDataModule):
             # shuffle=False
         )
 
+    def val_dataloader(self):
+        bs = self.config["trainer"].get("val_batch_size", self.config["trainer"]["train_batch_size"])
+        return DataLoader(
+            self.val_dataset,
+            batch_size=bs,
+            num_workers=self.config["trainer"]["num_dl_workers"],
+            pin_memory=True,
+            persistent_workers=False,
+            drop_last=False,
+            shuffle=False,
+            collate_fn=lambda batch: pad_to_max_size(
+                batch,
+                self.config["rin"]["patch_size"],
+                self.config["rin"]["tape_dim"],
+                self.transform,
+                return_padded_images_for_fid=True,
+            ),
+        )
+
 
 class RinLightningModule(LightningModule):
     def __init__(self, config):
@@ -347,8 +413,8 @@ class RinLightningModule(LightningModule):
         batch_class = torch.nn.functional.one_hot(batch_class, num_classes=self.num_classes).float()
 
         opt.zero_grad()
-        # Optional FLOPs profiling on first step (forward and backward separated)
-        if self.hparams["trainer"].get("profile_flops", False) and self.global_step == 0:
+        # Optional FLOPs profiling (run once on the first training_step that hits this code)
+        if self.hparams["trainer"].get("profile_flops", False) and not getattr(self, "_flops_profiled", False):
             activities = [torch.profiler.ProfilerActivity.CPU]
             if torch.cuda.is_available():
                 activities.append(torch.profiler.ProfilerActivity.CUDA)
@@ -359,14 +425,14 @@ class RinLightningModule(LightningModule):
                 loss = self(batch_img, pos_embs, batch_class, offsets, offsets_pos_embs, document_ids)
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
-            fwd_flops = sum(getattr(ev, "flops", 0) for ev in prof_fwd.key_averages())
+            fwd_flops = float(sum(getattr(ev, "flops", 0) for ev in prof_fwd.key_averages()))
 
             # Profile backward pass
             with torch.profiler.profile(activities=activities, with_flops=True) as prof_bwd:
                 self.manual_backward(loss)
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
-            bwd_flops = sum(getattr(ev, "flops", 0) for ev in prof_bwd.key_averages())
+            bwd_flops = float(sum(getattr(ev, "flops", 0) for ev in prof_bwd.key_averages()))
 
             step_total_flops = float(fwd_flops + bwd_flops)
 
@@ -377,16 +443,42 @@ class RinLightningModule(LightningModule):
             print(f"FLOPs/backward_G: {bwd_flops / 1e9}")
             print(f"FLOPs/step_G: {step_total_flops / 1e9}")
 
+            # Log as metrics (reliable across logger types)
+            self.log("FLOPs/forward_total", torch.tensor(fwd_flops), on_step=True, prog_bar=False, logger=True)
+            self.log("FLOPs/backward_total", torch.tensor(bwd_flops), on_step=True, prog_bar=False, logger=True)
+            self.log("FLOPs/step_total", torch.tensor(step_total_flops), on_step=True, prog_bar=False, logger=True)
+            self.log("FLOPs/forward_G", torch.tensor(fwd_flops / 1e9), on_step=True, prog_bar=False, logger=True)
+            self.log("FLOPs/backward_G", torch.tensor(bwd_flops / 1e9), on_step=True, prog_bar=False, logger=True)
+            self.log("FLOPs/step_G", torch.tensor(step_total_flops / 1e9), on_step=True, prog_bar=False, logger=True)
+
+            # Best-effort: also push to WandB summary if available
             try:
+                exp = None
                 if isinstance(self.logger, WandbLogger):
-                    self.logger.experiment.summary["FLOPs/forward_total"] = int(fwd_flops)
-                    self.logger.experiment.summary["FLOPs/backward_total"] = int(bwd_flops)
-                    self.logger.experiment.summary["FLOPs/step_total"] = int(step_total_flops)
-                    self.logger.experiment.summary["FLOPs/forward_G"] = float(fwd_flops) / 1e9
-                    self.logger.experiment.summary["FLOPs/backward_G"] = float(bwd_flops) / 1e9
-                    self.logger.experiment.summary["FLOPs/step_G"] = step_total_flops / 1e9
+                    exp = self.logger.experiment
+                elif hasattr(self.logger, "experiment"):
+                    exp = getattr(self.logger, "experiment", None)
+                if exp is not None and hasattr(exp, "summary"):
+                    exp.summary["FLOPs/forward_total"] = int(fwd_flops)
+                    exp.summary["FLOPs/backward_total"] = int(bwd_flops)
+                    exp.summary["FLOPs/step_total"] = int(step_total_flops)
+                    exp.summary["FLOPs/forward_G"] = float(fwd_flops) / 1e9
+                    exp.summary["FLOPs/backward_G"] = float(bwd_flops) / 1e9
+                    exp.summary["FLOPs/step_G"] = step_total_flops / 1e9
+                else:
+                    # Fallback to global wandb if active
+                    if hasattr(wandb, "run") and wandb.run is not None:
+                        wandb.run.summary["FLOPs/forward_total"] = int(fwd_flops)
+                        wandb.run.summary["FLOPs/backward_total"] = int(bwd_flops)
+                        wandb.run.summary["FLOPs/step_total"] = int(step_total_flops)
+                        wandb.run.summary["FLOPs/forward_G"] = float(fwd_flops) / 1e9
+                        wandb.run.summary["FLOPs/backward_G"] = float(bwd_flops) / 1e9
+                        wandb.run.summary["FLOPs/step_G"] = step_total_flops / 1e9
             except Exception:
                 pass
+            finally:
+                # Ensure we only profile once
+                self._flops_profiled = True
         else:
             loss = self(batch_img, pos_embs, batch_class, offsets, offsets_pos_embs, document_ids)
             self.manual_backward(loss)
@@ -450,6 +542,84 @@ class RinLightningModule(LightningModule):
             self.ema_diffusion_model.train()
 
         return loss
+
+    def on_fit_start(self):
+        cfg = self.hparams["trainer"].get("fid", {})
+        self._fid_enabled = bool(cfg.get("enabled", True))
+        if not self._fid_enabled:
+            return
+        self._fid_num_real = int(cfg.get("num_real", 10000))
+        self._fid_num_gen = int(cfg.get("num_gen", self._fid_num_real))
+        self._fid_gen_bs = int(cfg.get("gen_batch_size", 64))
+        # Initialize metric on the right device
+        self.fid = FrechetInceptionDistance(feature=2048).to(self.device)
+
+    def on_validation_epoch_start(self):
+        if getattr(self, "_fid_enabled", False):
+            self.fid.reset()
+            self._fid_real_seen = 0
+
+    def validation_step(self, batch, batch_idx):
+        if not getattr(self, "_fid_enabled", False):
+            return
+        # Handle multiple possible batch structures
+        imgs = None
+        if isinstance(batch, (list, tuple)):
+            # Expecting collated training-style tuple with optional fid batch at the end
+            if len(batch) == 7:
+                imgs = batch[6]
+            else:
+                # No direct image tensor available for FID; skip
+                return
+        elif isinstance(batch, dict):
+            imgs = batch.get("image")
+            if imgs is None:
+                return
+        elif torch.is_tensor(batch):
+            imgs = batch
+        else:
+            return
+
+        imgs = imgs.to(self.device)
+        imgs_u8 = (imgs.clamp(0, 1) * 255).to(torch.uint8)
+        remain = max(0, self._fid_num_real - getattr(self, "_fid_real_seen", 0))
+        if remain <= 0:
+            return
+        take = min(imgs_u8.size(0), remain)
+        if take > 0:
+            self.fid.update(imgs_u8[:take], real=True)
+            self._fid_real_seen += take
+
+    def on_validation_epoch_end(self):
+        if not getattr(self, "_fid_enabled", False) or getattr(self, "_fid_real_seen", 0) == 0:
+            return
+        # Skip expensive generation during Lightning's sanity check phase
+        if getattr(self.trainer, "sanity_checking", False):
+            return
+        self.ema_diffusion_model.eval()
+        world_size = getattr(self.trainer, "world_size", 1) or 1
+        per_rank_gen = max(1, self._fid_num_gen // world_size)
+        try:
+            with torch.no_grad():
+                gen_left = per_rank_gen
+                while gen_left > 0:
+                    bs = min(self._fid_gen_bs, gen_left)
+                    samples = self.ema_diffusion_model.sample(
+                        num_samples=bs,
+                        image_height=self.image_height,
+                        image_width=self.image_width,
+                        tape_dim=self.tape_dim,
+                        class_override=self.overfit_class,
+                        **self.sampling_kwargs,
+                    ).clamp(0, 1).to(self.device)
+                    samples_u8 = (samples * 255).to(torch.uint8)
+                    self.fid.update(samples_u8, real=False)
+                    gen_left -= bs
+        finally:
+            self.ema_diffusion_model.train()
+
+        fid_score = self.fid.compute()
+        self.log("metrics/fid", fid_score, prog_bar=True, on_epoch=True, logger=True, sync_dist=True)
     
     def configure_optimizers(self):
         optimizer = get_optimizer(

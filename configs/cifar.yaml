@@ -61,9 +61,19 @@ trainer:
     method: "ddim"
   checkpoint_folder: "/dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/cifar/masked/"
   run_name: "cifar_flex_nested_comp_weights"
-  log_to_wandb: false
+  log_to_wandb: true
   log_every_n_steps: 10
   overfit_one_sample: false
+  # validation knobs (enable to run validation/FID)
+  check_val_every_n_epoch: 1
+  limit_val_batches: 100
+  profile_flops: true
+  # FID evaluation settings
+  fid:
+    enabled: true
+    num_real: 10000
+    num_gen: 10000
+    gen_batch_size: 128
 
 run:
   vanilla: false

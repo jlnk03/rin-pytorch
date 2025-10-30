@@ -7,3 +7,6 @@ accelerate
 numpy
 einops
 wandb
+lightning
+torch-fidelity
+torchmetrics
