@@ -365,6 +365,12 @@ class Rin(torch.nn.Module):
         tape_r: torch.Tensor | None,
         masks: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Collect first-sample per-layer token change metrics for optional analysis/logging
+        per_layer_abs: list[torch.Tensor] = []
+        per_layer_rel: list[torch.Tensor] = []
+        per_layer_normed: list[torch.Tensor] = []
+        per_layer_cosine: list[torch.Tensor] = []
+
         for i in range(len(self._num_layers)):
             # pass masks to read and write units
             if self._cond_decoupled_read:
@@ -374,7 +380,56 @@ class Rin(torch.nn.Module):
                 tape_merged = _concat_tokens(tape, tape_r)
                 latent = self.read_units[i](latent, tape_merged, masks, mode="read")
             latent = self.latent_processing_units[i](latent)
-            tape = self.write_units[i](tape, latent, mode="write")
+            # Capture image token slice before write
+            tape_tokens_in = tape[:, : self._tape_slots]
+            tape_out = self.write_units[i](tape, latent, mode="write")
+
+            # Compute per-token changes (no grad to avoid overhead)
+            with torch.no_grad():
+                out_tokens = tape_out[:, : self._tape_slots]
+                delta = out_tokens - tape_tokens_in
+                abs_change = delta.norm(dim=-1)
+                in_norm = tape_tokens_in.norm(dim=-1)
+                rel_change = abs_change / (in_norm + 1e-8)
+                importance = rel_change / (rel_change.sum(dim=-1, keepdim=True) + 1e-8)
+                cosine_change = 1.0 - F.cosine_similarity(out_tokens, tape_tokens_in, dim=-1).clamp(-1, 1)
+                print(f'delta: {delta}')
+                # Log first-sample vectors per layer
+                log_first_tensor(f"rin.tape_abs_change.l{i}", abs_change)
+                log_first_tensor(f"rin.tape_rel_change.l{i}", rel_change)
+                log_first_tensor(f"rin.tape_importance.l{i}", importance)
+                log_first_tensor(f"rin.tape_cosine_change.l{i}", cosine_change)
+
+                # Persist first-sample metrics for downstream inspection
+                per_layer_abs.append(abs_change[0].detach().to("cpu"))
+                per_layer_rel.append(rel_change[0].detach().to("cpu"))
+                per_layer_normed.append(importance[0].detach().to("cpu"))
+                per_layer_cosine.append(cosine_change[0].detach().to("cpu"))
+
+            tape = tape_out
+
+        # Aggregate across layers (first sample) and store
+        with torch.no_grad():
+            if len(per_layer_rel) > 0:
+                rel_sum = torch.stack(per_layer_rel, dim=0).sum(dim=0)
+                cosine_sum = torch.stack(per_layer_cosine, dim=0).sum(dim=0) if len(per_layer_cosine) > 0 else None
+                # Log aggregates as vectors (wrap with batch dim to keep full vector)
+                log_first_tensor("rin.tape_importance.rel.sum", rel_sum.unsqueeze(0))
+                if cosine_sum is not None:
+                    log_first_tensor("rin.tape_cosine_change.sum", cosine_sum.unsqueeze(0))
+                # Save for programmatic access
+                self.last_token_importance = {
+                    "per_layer": {
+                        "abs": per_layer_abs,
+                        "rel": per_layer_rel,
+                        "normed": per_layer_normed,
+                        "cosine": per_layer_cosine,
+                    },
+                    "aggregate": {
+                        "rel_sum": rel_sum,
+                        "cosine_sum": cosine_sum,
+                    },
+                }
         return latent, tape
 
     def readout_tape(self, tape: torch.Tensor, n_rows: int, n_cols: int) -> torch.Tensor:
