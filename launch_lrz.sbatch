@@ -4,12 +4,12 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --clusters=hpda2
 #SBATCH --partition=hpda2_compute_gpu
-#SBATCH --nodes=2
+#SBATCH --nodes=4
 #SBATCH --ntasks-per-node=4
 #SBATCH --gres=gpu:4
 #SBATCH --time=6-00:00:00
 
 echo "Starting the job"
 echo "Job ID: $SLURM_JOB_ID"
-srun python train.py --config configs/cifar.yaml
+srun python train.py --config configs/128.yaml
 echo "Job finished"
