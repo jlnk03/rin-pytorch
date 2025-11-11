@@ -37,7 +37,7 @@ diffusion:
 
 trainer:
   num_classes: 10
-  train_num_steps: 1
+  train_num_steps: 150000
   train_batch_size: 4
   split_batches: true
   fp16: false
@@ -60,7 +60,7 @@ trainer:
     iterations: 100
     method: "ddim"
   checkpoint_folder: "/dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/cifar/"
-  run_name: "cifar_flex_att_comp_weights"
+  run_name: "cifar_flex_ps_2"
   log_to_wandb: true 
   log_every_n_steps: 10
 
