@@ -61,7 +61,8 @@ class ImageNetWebDataset(IterableDataset):
         self.transform = transform
 
         try:
-            self.dataset = load_dataset("imagenet-1k", split="train", trust_remote_code=True)
+            self.dataset = load_dataset("imagenet-1k", split="train") 
+            # self.dataset = load_dataset("timm/imagenet-1k-wds", split="train")
         except Exception as e:
             print(e)
         
@@ -340,11 +341,11 @@ class RinLightningModule(LightningModule):
             grid = torchvision.utils.make_grid(samples, nrow=n, normalize=True, value_range=(0, 1), padding=0)
             self.logger.experiment.log({"samples": [wandb.Image(grid)]}, step=self.global_step)
 
-            samples_horizontal = self.ema_diffusion_model.sample(num_samples=n * n, image_height=self.image_height * 0.75, image_width=self.image_width, tape_dim=self.tape_dim, **self.sampling_kwargs)
+            samples_horizontal = self.ema_diffusion_model.sample(num_samples=n * n, image_height=int(self.image_height * 0.75), image_width=self.image_width, tape_dim=self.tape_dim, **self.sampling_kwargs)
             grid_horizontal = torchvision.utils.make_grid(samples_horizontal, nrow=n, normalize=True, value_range=(0, 1), padding=0)
             self.logger.experiment.log({"samples_horizontal": [wandb.Image(grid_horizontal)]}, step=self.global_step)
 
-            samples_vertical = self.ema_diffusion_model.sample(num_samples=n * n, image_height=self.image_height, image_width=self.image_width * 0.75, tape_dim=self.tape_dim, **self.sampling_kwargs)
+            samples_vertical = self.ema_diffusion_model.sample(num_samples=n * n, image_height=self.image_height, image_width=int(self.image_width * 0.75), tape_dim=self.tape_dim, **self.sampling_kwargs)
             grid_vertical = torchvision.utils.make_grid(samples_vertical, nrow=n, normalize=True, value_range=(0, 1), padding=0)
             self.logger.experiment.log({"samples_vertical": [wandb.Image(grid_vertical)]}, step=self.global_step)
 

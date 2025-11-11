@@ -28,8 +28,8 @@ rin:
   num_classes: 1000
 
 diffusion:
-  # train_schedule: "sigmoid@-3,3,0.9"
-  train_schedule: "simple_linear"
+  train_schedule: "sigmoid@-3,3,0.9"
+  # train_schedule: "simple_linear"
   inference_schedule: "cosine"
   pred_type: "eps"
   self_cond: "latent"
