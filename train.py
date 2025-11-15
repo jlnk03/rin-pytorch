@@ -170,7 +170,9 @@ def main():
         every_n_train_steps=config["trainer"]["sample_every"],
         save_weights_only=False,
         save_top_k=1,
-        save_last=True
+        save_last=True,
+        monitor="loss",
+        mode="min",
     )
     
     lr_monitor = LearningRateMonitor(logging_interval='step')
@@ -181,8 +183,8 @@ def main():
         logger=wandb_logger,
         callbacks=[checkpoint_callback, lr_monitor],
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
-        num_nodes= 4,
-        devices=4,
+        num_nodes= 1,
+        devices=1,
         precision="bf16" if config["trainer"]["fp16"] else "32",
         # gradient_clip_val=config["trainer"]["clip_grad_norm"],
         strategy='ddp_find_unused_parameters_true' if torch.cuda.device_count() > 1 else "auto",
@@ -200,11 +202,11 @@ def main():
         model = RinLightningModule(config)
 
     # Run one-time FLOPs profiling before compiling (ensures profiler is not ignored)
-    maybe_profile_flops_precompile(model, data_module)
+    # maybe_profile_flops_precompile(model, data_module)
 
-    if torch.cuda.is_available():
-        print("Compiling model")
-        model = torch.compile(model, dynamic=True)
+    # if torch.cuda.is_available():
+    #     print("Compiling model")
+        # model = torch.compile(model, dynamic=True)
     
     # Start training
     trainer.fit(model, datamodule=data_module, ckpt_path=args.resume_checkpoint)

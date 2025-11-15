@@ -7,7 +7,7 @@ from .DropPath import DropPath
 from .MLP import MLP
 from .FlexMultiheadAttention import FlexMultiheadAttention
 
-# create_block_mask = torch.compile(create_block_mask, dynamic=True)
+create_block_mask = torch.compile(create_block_mask, dynamic=True)
 
 
 # @lru_cache

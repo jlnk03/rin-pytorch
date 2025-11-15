@@ -18,7 +18,7 @@ rin:
   drop_att: 0.0
   time_scaling: 1000
   self_cond: "latent"
-  time_on_latent: false
+  time_on_latent: true
   cond_on_latent_n: 1
   cond_tape_writable: false
   cond_dim: 0

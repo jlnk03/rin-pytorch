@@ -225,33 +225,6 @@ class ImageNetDataModule(LightningDataModule):
                 # transform=self.transform
             )
 
-        # Validation datasets
-        if stage in (None, "fit", "validate"):
-            if self.config["run"]["cifar"]:
-                self.val_dataset = FlexibleCIFAR10(
-                    "datasets/cifar10_flex",
-                    train=False,
-                )
-            else:
-                try:
-                    ds_val = load_dataset("imagenet-1k", split="validation", trust_remote_code=True)
-                except Exception as e:
-                    print(e)
-                    ds_val = None
-
-                class HFVal(Dataset):
-                    def __init__(self, ds):
-                        self.ds = ds
-                    def __len__(self):
-                        return 0 if self.ds is None else len(self.ds)
-                    def __getitem__(self, idx):
-                        s = self.ds[idx]
-                        img = s["image"].convert("RGB")
-                        # Return PIL image; collate_fn will apply transforms identically to train
-                        return {"image": img, "label": s.get("label", -1)}
-
-                self.val_dataset = HFVal(ds_val)
-
         # Optionally wrap to overfit on a single sample from a random (or specified) class
         if self.overfit_one_sample:
             def extract_label(sample):
@@ -340,25 +313,6 @@ class ImageNetDataModule(LightningDataModule):
             drop_last=True,
             collate_fn=lambda batch: pad_to_max_size(batch, self.config["rin"]["patch_size"], self.config["rin"]["tape_dim"], self.transform),
             # shuffle=False
-        )
-
-    def val_dataloader(self):
-        bs = self.config["trainer"].get("val_batch_size", self.config["trainer"]["train_batch_size"])
-        return DataLoader(
-            self.val_dataset,
-            batch_size=bs,
-            num_workers=self.config["trainer"]["num_dl_workers"],
-            pin_memory=True,
-            persistent_workers=False,
-            drop_last=False,
-            shuffle=False,
-            collate_fn=lambda batch: pad_to_max_size(
-                batch,
-                self.config["rin"]["patch_size"],
-                self.config["rin"]["tape_dim"],
-                self.transform,
-                return_padded_images_for_fid=True,
-            ),
         )
 
 
@@ -506,7 +460,8 @@ class RinLightningModule(LightningModule):
         # }
 
         # Prefer: log tensors to avoid graph breaks; LR is handled by LearningRateMonitor
-        self.log("loss", loss.detach(), on_step=True, prog_bar=True, logger=True)
+        # Expose to callbacks (e.g., ModelCheckpoint) but do not send to external loggers
+        self.log("loss", loss.detach(), on_step=True, on_epoch=True, prog_bar=True, logger=False, sync_dist=True)
 
         # If you still want to log LR yourself, convert to a tensor (optional)
         # lr_tensor = torch.tensor(sch.get_last_lr()[0], device=loss.device)
@@ -532,7 +487,7 @@ class RinLightningModule(LightningModule):
             grid_horizontal = torchvision.utils.make_grid(samples_horizontal, nrow=n, normalize=True, value_range=(0, 1), padding=0)
             self.logger.experiment.log({"samples_horizontal": [wandb.Image(grid_horizontal)]}, step=self.global_step)
 
-            samples_vertical = self.ema_diffusion_model.sample(num_samples=n * n, image_height=self.image_height, image_width=(self.image_width * 0.75), tape_dim=self.tape_dim, class_override=class_override, **self.sampling_kwargs)
+            samples_vertical = self.ema_diffusion_model.sample(num_samples=n * n, image_height=self.image_height, image_width=int(self.image_width * 0.75), tape_dim=self.tape_dim, class_override=class_override, **self.sampling_kwargs)
             grid_vertical = torchvision.utils.make_grid(samples_vertical, nrow=n, normalize=True, value_range=(0, 1), padding=0)
             self.logger.experiment.log({"samples_vertical": [wandb.Image(grid_vertical)]}, step=self.global_step)
 
@@ -542,84 +497,6 @@ class RinLightningModule(LightningModule):
             self.ema_diffusion_model.train()
 
         return loss
-
-    def on_fit_start(self):
-        cfg = self.hparams["trainer"].get("fid", {})
-        self._fid_enabled = bool(cfg.get("enabled", True))
-        if not self._fid_enabled:
-            return
-        self._fid_num_real = int(cfg.get("num_real", 10000))
-        self._fid_num_gen = int(cfg.get("num_gen", self._fid_num_real))
-        self._fid_gen_bs = int(cfg.get("gen_batch_size", 64))
-        # Initialize metric on the right device
-        self.fid = FrechetInceptionDistance(feature=2048).to(self.device)
-
-    def on_validation_epoch_start(self):
-        if getattr(self, "_fid_enabled", False):
-            self.fid.reset()
-            self._fid_real_seen = 0
-
-    def validation_step(self, batch, batch_idx):
-        if not getattr(self, "_fid_enabled", False):
-            return
-        # Handle multiple possible batch structures
-        imgs = None
-        if isinstance(batch, (list, tuple)):
-            # Expecting collated training-style tuple with optional fid batch at the end
-            if len(batch) == 7:
-                imgs = batch[6]
-            else:
-                # No direct image tensor available for FID; skip
-                return
-        elif isinstance(batch, dict):
-            imgs = batch.get("image")
-            if imgs is None:
-                return
-        elif torch.is_tensor(batch):
-            imgs = batch
-        else:
-            return
-
-        imgs = imgs.to(self.device)
-        imgs_u8 = (imgs.clamp(0, 1) * 255).to(torch.uint8)
-        remain = max(0, self._fid_num_real - getattr(self, "_fid_real_seen", 0))
-        if remain <= 0:
-            return
-        take = min(imgs_u8.size(0), remain)
-        if take > 0:
-            self.fid.update(imgs_u8[:take], real=True)
-            self._fid_real_seen += take
-
-    def on_validation_epoch_end(self):
-        if not getattr(self, "_fid_enabled", False) or getattr(self, "_fid_real_seen", 0) == 0:
-            return
-        # Skip expensive generation during Lightning's sanity check phase
-        if getattr(self.trainer, "sanity_checking", False):
-            return
-        self.ema_diffusion_model.eval()
-        world_size = getattr(self.trainer, "world_size", 1) or 1
-        per_rank_gen = max(1, self._fid_num_gen // world_size)
-        try:
-            with torch.no_grad():
-                gen_left = per_rank_gen
-                while gen_left > 0:
-                    bs = min(self._fid_gen_bs, gen_left)
-                    samples = self.ema_diffusion_model.sample(
-                        num_samples=bs,
-                        image_height=self.image_height,
-                        image_width=self.image_width,
-                        tape_dim=self.tape_dim,
-                        class_override=self.overfit_class,
-                        **self.sampling_kwargs,
-                    ).clamp(0, 1).to(self.device)
-                    samples_u8 = (samples * 255).to(torch.uint8)
-                    self.fid.update(samples_u8, real=False)
-                    gen_left -= bs
-        finally:
-            self.ema_diffusion_model.train()
-
-        fid_score = self.fid.compute()
-        self.log("metrics/fid", fid_score, prog_bar=True, on_epoch=True, logger=True, sync_dist=True)
     
     def configure_optimizers(self):
         optimizer = get_optimizer(

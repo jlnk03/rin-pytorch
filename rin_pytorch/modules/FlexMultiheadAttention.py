@@ -5,10 +5,10 @@ from typing import Optional, Tuple
 from torch.nn.attention.flex_attention import flex_attention, BlockMask
 
 
-# flex_compiled = torch.compile(
-#     flex_attention,
-#     dynamic=True
-# )
+flex_attention = torch.compile(
+    flex_attention,
+    dynamic=True
+)
 
 
 def _expand_kv_heads(hidden_states: torch.Tensor, repeats_per_kv_head: int) -> torch.Tensor:
