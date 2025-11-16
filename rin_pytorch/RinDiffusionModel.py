@@ -3,6 +3,7 @@ from tqdm import tqdm
 
 from .Rin import Rin
 from .utils import diffusion_utils
+from .utils.pos_embedding import create_2d_sin_cos_pos_emb
 
 
 class RinDiffusionModel(torch.nn.Module):
@@ -55,8 +56,22 @@ class RinDiffusionModel(torch.nn.Module):
         return output, latent, tape
 
     @torch.no_grad()
-    def sample(self, num_samples=64, iterations=100, method="ddim", seed=None, class_override=None):
-        samples_shape = [num_samples, *self.denoiser.image_shape]
+    def sample(
+        self,
+        num_samples=64,
+        iterations=100,
+        method="ddim",
+        seed=None,
+        class_override=None,
+        image_height: int | None = None,
+        image_width: int | None = None,
+        tape_dim: int | None = None,
+        tape_pos_emb: torch.Tensor | None = None,
+    ):
+        channels, default_height, default_width = self.denoiser.image_shape
+        target_height = image_height if image_height is not None else default_height
+        target_width = image_width if image_width is not None else default_width
+        samples_shape = [num_samples, channels, target_height, target_width]
         device = self.denoiser.device
         if self._conditional == "class":
             # generate random classes
@@ -82,6 +97,35 @@ class RinDiffusionModel(torch.nn.Module):
 
         latent_prev = None
         tape_prev = None
+
+        def _prepare_pos_emb(pos_emb: torch.Tensor) -> torch.Tensor:
+            if pos_emb.ndim == 2:
+                pos_emb = pos_emb.unsqueeze(0)
+            if pos_emb.size(0) == 1 and num_samples > 1:
+                pos_emb = pos_emb.repeat(num_samples, 1, 1)
+            if pos_emb.size(0) != num_samples:
+                raise ValueError("tape_pos_emb batch dimension must equal num_samples or be 1.")
+            return pos_emb
+
+        patch_size = self.denoiser.stem.kernel_size
+        if isinstance(patch_size, tuple):
+            patch_size = patch_size[0]
+
+        auto_pos_emb = None
+        if tape_pos_emb is not None:
+            auto_pos_emb = _prepare_pos_emb(tape_pos_emb)
+        elif image_height is not None or image_width is not None:
+            if target_height % patch_size != 0 or target_width % patch_size != 0:
+                raise ValueError("image_height and image_width must be divisible by patch size.")
+            nh = target_height // patch_size
+            nw = target_width // patch_size
+            tape_dim_value = tape_dim if tape_dim is not None else self.denoiser.tape_shape[-1]
+            base_pos = create_2d_sin_cos_pos_emb(nh, nw, tape_dim_value)
+            auto_pos_emb = base_pos.unsqueeze(0).repeat(num_samples, 1, 1)
+
+        if auto_pos_emb is not None:
+            auto_pos_emb = auto_pos_emb.to(device)
+
         for t in tqdm(
             torch.arange(iterations, dtype=torch.float32, device=device), desc="sampling", leave=False, position=1
         ):
@@ -89,7 +133,14 @@ class RinDiffusionModel(torch.nn.Module):
             time_step_p = torch.max(get_step(t + 1), torch.tensor(0.0))
             gamma, gamma_prev = time_transform(time_step), time_transform(time_step_p)
 
-            pred_out, latent_prev, tape_prev = self.denoise(samples, gamma, cond, latent_prev, tape_prev)
+            pred_out, latent_prev, tape_prev = self.denoise(
+                samples,
+                gamma,
+                cond,
+                latent_prev,
+                tape_prev,
+                tape_pos_emb=auto_pos_emb,
+            )
             x0_eps = diffusion_utils.get_x0_eps(
                 samples, gamma, pred_out, self._pred_type, truncate_noise=True, clip_x0=True
             )

@@ -35,6 +35,11 @@ class RinLightningModule(LightningModule):
 
         self.automatic_optimization = False
 
+        self.image_height = rin_config["image_height"]
+        self.image_width = rin_config["image_width"]
+        self.tape_dim = rin_config["tape_dim"]
+        self.patch_size = rin_config["patch_size"]
+
         self.rin = Rin(**rin_config)
         self.rin.pass_dummy_data(num_classes=rin_config["num_classes"])
         self.diffusion_model = RinDiffusionModel(rin=self.rin, **diffusion_config)
@@ -214,11 +219,52 @@ class RinLightningModule(LightningModule):
 
         self.ema_diffusion_model.eval()
         n = 8
-        with torch.no_grad():
-            samples = self.ema_diffusion_model.sample(num_samples=n * n, **self.sampling_kwargs)
+        num_samples = n * n
 
-        grid = make_grid(samples, nrow=n, normalize=True, value_range=(0, 1), padding=0)
-        logger.log({"samples": [wandb.Image(grid)]}, step=step)
+        def _snap_to_patch_multiple(value: int, upper_bound: int) -> int:
+            value = min(value, upper_bound)
+            remainder = value % self.patch_size
+            if remainder:
+                value -= remainder
+            if value <= 0:
+                value = self.patch_size
+            return value
+
+        with torch.no_grad():
+            def _sample_with_overrides(**overrides):
+                sampling_kwargs = dict(self.sampling_kwargs)
+                sampling_kwargs.update(overrides)
+                return self.ema_diffusion_model.sample(**sampling_kwargs)
+
+            samples = _sample_with_overrides(num_samples=num_samples)
+            grid = make_grid(samples, nrow=n, normalize=True, value_range=(0, 1), padding=0)
+            logger.log({"samples": [wandb.Image(grid)]}, step=step)
+
+            horizontal_height = _snap_to_patch_multiple(int(self.image_height * 0.75), self.image_height)
+            samples_horizontal = _sample_with_overrides(
+                num_samples=num_samples,
+                image_height=horizontal_height,
+                image_width=self.image_width,
+                tape_dim=self.tape_dim,
+            )
+            grid_horizontal = make_grid(
+                samples_horizontal, nrow=n, normalize=True, value_range=(0, 1), padding=0
+            )
+            logger.log({"samples_horizontal": [wandb.Image(grid_horizontal)]}, step=step)
+
+            vertical_width = _snap_to_patch_multiple(int(self.image_width * 0.75), self.image_width)
+            samples_vertical = _sample_with_overrides(
+                num_samples=num_samples,
+                image_height=self.image_height,
+                image_width=vertical_width,
+                tape_dim=self.tape_dim,
+            )
+            grid_vertical = make_grid(
+                samples_vertical, nrow=n, normalize=True, value_range=(0, 1), padding=0
+            )
+            logger.log({"samples_vertical": [wandb.Image(grid_vertical)]}, step=step)
 
         del samples
+        del samples_horizontal
+        del samples_vertical
         self.ema_diffusion_model.train()
