@@ -113,8 +113,8 @@ class RinLightningModule(LightningModule):
         if scheduler is not None:
             scheduler.step()
 
-        opt.zero_grad(set_to_none=True)
-        self._grad_accum_counter = 0
+        # opt.zero_grad(set_to_none=True)
+        # self._grad_accum_counter = 0
 
         self.log(
             "loss",
