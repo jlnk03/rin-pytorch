@@ -257,6 +257,7 @@ class Rin(torch.nn.Module):
         time_emb: torch.Tensor | None,
         cond: torch.Tensor | None,
         tape_prev: torch.Tensor | None,
+        external_tape_pos: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         tape_r = None
         if not self._time_on_latent and time_emb is not None:
@@ -266,9 +267,17 @@ class Rin(torch.nn.Module):
 
         tape = self.stem(x)
         tape = rearrange(tape, "b d h w -> b (h w) d")
-        tape_pos_emb = rearrange(self.tape_pos_emb, "n d -> 1 n d")
-        if self._tape_pos_encoding in ["sin_cos_plus_learned"]:
-            tape_pos_emb += rearrange(self.tape_pos_emb_res, "n d -> 1 n d")
+
+        if external_tape_pos is not None:
+            tape_pos_emb = external_tape_pos
+            if tape_pos_emb.shape[:2] != tape.shape[:2]:
+                raise ValueError("External tape positional embeddings must match tape tokens.")
+        else:
+            tape_pos_emb = rearrange(self.tape_pos_emb, "n d -> 1 n d")
+            if self._tape_pos_encoding in ["sin_cos_plus_learned"]:
+                tape_pos_emb += rearrange(self.tape_pos_emb_res, "n d -> 1 n d")
+
+        tape_pos_emb = tape_pos_emb.to(tape.device)
         tape = self.stem_ln(tape) + tape_pos_emb
 
         if self._self_cond in ["tape", "latent+tape"] and tape_prev is not None:
@@ -302,14 +311,34 @@ class Rin(torch.nn.Module):
         latent: torch.Tensor,
         tape: torch.Tensor,
         tape_r: torch.Tensor | None,
+        tape_key_padding_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        tape_padding_mask = tape_key_padding_mask
+        merged_padding_mask = tape_key_padding_mask
+        if tape_key_padding_mask is not None and tape_r is not None:
+            zeros = torch.zeros(
+                tape_key_padding_mask.size(0),
+                tape_r.size(-2),
+                dtype=tape_key_padding_mask.dtype,
+                device=tape_key_padding_mask.device,
+            )
+            merged_padding_mask = torch.cat([tape_key_padding_mask, zeros], dim=1)
+
         for i in range(len(self._num_layers)):
             if self._cond_decoupled_read:
-                latent = self.read_cond_units[i](latent, tape_r)
-                latent = self.read_units[i](latent, tape)
+                latent = self.read_cond_units[i](latent, tape_r, enc_key_padding_mask=tape_padding_mask)
+                latent = self.read_units[i](
+                    latent,
+                    tape,
+                    enc_key_padding_mask=tape_padding_mask,
+                )
             else:
                 tape_merged = _concat_tokens(tape, tape_r)
-                latent = self.read_units[i](latent, tape_merged)
+                latent = self.read_units[i](
+                    latent,
+                    tape_merged,
+                    enc_key_padding_mask=merged_padding_mask,
+                )
             latent = self.latent_processing_units[i](latent)
             tape = self.write_units[i](tape, latent)
         return latent, tape
@@ -363,9 +392,18 @@ class Rin(torch.nn.Module):
         cond: torch.Tensor | None = None,
         latent_prev: torch.Tensor | None = None,
         tape_prev: torch.Tensor | None = None,
+        tape_padding_mask: torch.Tensor | None = None,
+        tape_pos_emb: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         assert x.ndim == 4
         bs = x.shape[0]
+
+        nmh = x.shape[2]
+        nmw = x.shape[3]
+        
+        self._n_rows = nmh // self._patch_size
+        self._n_cols = nmw // self._patch_size
+        self._num_tokens = self._n_rows * self._n_cols
 
         if isinstance(t, float) or t.ndim == 0:
             t = torch.full((bs,), t, device=x.device, dtype=torch.float32)
@@ -380,9 +418,13 @@ class Rin(torch.nn.Module):
             raise ValueError("cond is None but cond_on_latent is True")
 
         time_emb, cond = self.initialize_cond(t, cond)
-        tape, tape_r = self.initialize_tape(x, time_emb, cond, tape_prev)
+        tape_pos_emb = tape_pos_emb.to(x.device) if tape_pos_emb is not None else None
+        tape, tape_r = self.initialize_tape(x, time_emb, cond, tape_prev, tape_pos_emb)
         latent = self.initialize_latent(bs, time_emb, cond, latent_prev)
-        latent, tape = self.compute(latent, tape, tape_r)
+        tape_key_padding_mask = None
+        if tape_padding_mask is not None:
+            tape_key_padding_mask = (~tape_padding_mask.bool()).to(x.device)
+        latent, tape = self.compute(latent, tape, tape_r, tape_key_padding_mask)
         x = self.readout_tape(tape)
         return x, latent, tape[:, : self._tape_slots]
 

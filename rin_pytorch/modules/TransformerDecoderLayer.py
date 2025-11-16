@@ -77,6 +77,7 @@ class TransformerDecoderLayer(torch.nn.Module):
         self,
         x: torch.Tensor,
         enc: torch.Tensor,
+        enc_key_padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.self_attention:
             x_ln = self.self_ln(x)
@@ -86,7 +87,13 @@ class TransformerDecoderLayer(torch.nn.Module):
         if self.cross_attention:
             x_ln = self.cross_ln(x)
             enc = self.enc_ln(enc)
-            x_res, _ = self.cross_mha(query=x_ln, key=enc, value=enc, need_weights=False)
+            x_res, _ = self.cross_mha(
+                query=x_ln,
+                key=enc,
+                value=enc,
+                key_padding_mask=enc_key_padding_mask,
+                need_weights=False,
+            )
             x = x + self.dropp(x_res)
             
         if self.use_mlp:

@@ -55,14 +55,31 @@ class RinLightningModule(LightningModule):
 
         self._should_profile_first_step = True
 
-    def forward(self, batch_img, batch_class):
-        return self.diffusion_model(batch_img, batch_class)
+    def forward(self, batch_img, batch_class, batch_mask=None, pos_embs=None):
+        return self.diffusion_model(
+            batch_img,
+            batch_class,
+            attn_mask=batch_mask,
+            tape_pos_emb=pos_embs,
+        )
+
+    def _extract_batch(self, batch):
+        batch_mask = None
+        pos_embs = None
+        if isinstance(batch, dict):
+            batch_img = batch["images"]
+            batch_class = batch["labels"]
+            batch_mask = batch.get("patch_mask")
+            pos_embs = batch.get("pos_embs")
+        else:
+            batch_img, batch_class = batch
+        return batch_img, batch_class, batch_mask, pos_embs
 
     def training_step(self, batch, batch_idx):
         opt = self.optimizers()
         scheduler = self.lr_schedulers()
 
-        batch_img, batch_class = batch
+        batch_img, batch_class, batch_mask, pos_embs = self._extract_batch(batch)
         batch_class = F.one_hot(batch_class, num_classes=self.num_classes).float()
 
         opt.zero_grad(set_to_none=True)
@@ -83,7 +100,7 @@ class RinLightningModule(LightningModule):
             profiling_active = True
 
         with profiler_ctx as prof:
-            loss = self.forward(batch_img, batch_class)
+            loss = self.forward(batch_img, batch_class, batch_mask, pos_embs)
             self.manual_backward(loss)
 
         if self.clip_grad_norm is not None:
