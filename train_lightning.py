@@ -217,7 +217,7 @@ def build_dataloader(config, data_root: str):
         )
 
     if is_cifar:
-        dataset = FlexibleCIFAR10(root_dir=data_root, train=False, transform=transform)
+        dataset = FlexibleCIFAR10(root_dir=data_root, train=True, transform=transform)
     else:
         dataset = torchvision.datasets.ImageFolder(root=data_root, transform=transform)
 

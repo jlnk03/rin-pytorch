@@ -59,7 +59,6 @@ class RinLightningModule(LightningModule):
 
         self._should_profile_first_step = True
         self._grad_accum_counter = 0
-        self._trainer_step = 0
 
     def forward(self, batch_tokens, batch_class, batch_mask=None, pos_embs=None):
         return self.diffusion_model(
@@ -87,8 +86,6 @@ class RinLightningModule(LightningModule):
 
         batch_tokens, batch_class, batch_mask, pos_embs = self._extract_batch(batch)
         batch_class = F.one_hot(batch_class, num_classes=self.num_classes).float()
-        self._trainer_step += 1
-        should_log_samples = self.log_images and (self._trainer_step % self.sample_every == 0)
 
         # if self._grad_accum_counter == 0:
         opt.zero_grad(set_to_none=True)
@@ -181,11 +178,12 @@ class RinLightningModule(LightningModule):
 
         # if should_step:
         current_step = self.global_step + 1
+        should_log_samples = self.log_images and (current_step % self.sample_every == 0)
         if current_step % self.ema_update_every == 0:
             self._update_ema()
 
         if should_log_samples:
-            self._log_samples(self._trainer_step)
+            self._log_samples(current_step)
 
         return loss
 

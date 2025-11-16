@@ -64,7 +64,6 @@ trainer:
   log_to_wandb: true
   log_every_n_steps: 10
   profile_flops: true
-  gradient_accumulation_steps: 8
   # FID evaluation settings
   fid:
     enabled: false
