@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from pathlib import Path
 
 import torch
@@ -7,6 +8,7 @@ from diffusers.optimization import get_scheduler as get_lr_scheduler
 from torch.utils.data import DataLoader, Dataset
 from torchvision.utils import make_grid
 from tqdm import tqdm
+from torch.profiler import ProfilerActivity, profile
 
 from .RinDiffusionModel import RinDiffusionModel
 from .utils.optimization_utils import (
@@ -49,6 +51,7 @@ class Trainer:
         checkpoint_folder="results",
         run_name="rin",
         log_to_wandb=True,
+        gradient_accumulation_steps=1,
     ):
         self.accelerator = Accelerator(split_batches=split_batches, mixed_precision="fp16" if fp16 else "no")
         self.accelerator.native_amp = amp
@@ -62,6 +65,7 @@ class Trainer:
         self.ema_decay = ema_decay
         self.ema_update_every = ema_update_every
         self.sampling_kwargs = sampling_kwargs
+        self.gradient_accumulation_steps = max(1, gradient_accumulation_steps)
 
         dl = DataLoader(
             dataset,
@@ -104,6 +108,7 @@ class Trainer:
             self.checkpoint_folder.mkdir(exist_ok=True, parents=True)
 
         self.step = 0
+        self._should_profile_first_step = True
 
         self.diffusion_model, self.optimizer, self.lr_scheduler = self.accelerator.prepare(
             self.diffusion_model, self.optimizer, self.lr_scheduler
@@ -166,9 +171,24 @@ class Trainer:
 
                 self.optimizer.zero_grad()
 
-                loss = self.diffusion_model(batch_img, batch_class)
+                profiler_ctx = nullcontext()
+                profiling_active = False
+                if self._should_profile_first_step:
+                    activities = [ProfilerActivity.CPU]
+                    if torch.cuda.is_available():
+                        activities.append(ProfilerActivity.CUDA)
+                    profiler_ctx = profile(
+                        activities=activities,
+                        record_shapes=True,
+                        profile_memory=False,
+                        with_stack=False,
+                        with_flops=True,
+                    )
+                    profiling_active = True
 
-                self.accelerator.backward(loss)
+                with profiler_ctx as prof:
+                    loss = self.diffusion_model(batch_img, batch_class)
+                    self.accelerator.backward(loss)
 
                 if self.clip_grad_norm is not None:
                     self.accelerator.clip_grad_norm_(self.diffusion_model.parameters(), self.clip_grad_norm)
@@ -178,7 +198,19 @@ class Trainer:
                 logs = {
                     "loss": loss.item(),
                     "lr": self.lr_scheduler.get_last_lr()[0],
+                    "trainer/global_step": self.step,
                 }
+
+                if profiling_active and prof is not None:
+                    total_flops = sum(event.flops for event in prof.key_averages() if event.flops)
+                    logs["profiler/total_flops"] = total_flops
+                    logs["profiler/total_tflops"] = total_flops / 1e12
+                    self.accelerator.print(
+                        f"Profiled FLOPs (first forward/backward): {total_flops / 1e12:.4f} TFLOPs"
+                        if total_flops
+                        else "Profiler executed but no FLOPs information was collected."
+                    )
+                    self._should_profile_first_step = False
 
                 pbar.set_postfix(logs)
                 if self.accelerator.is_main_process:

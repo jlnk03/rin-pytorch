@@ -5,6 +5,8 @@ from torch.utils.data import Dataset
 
 from rin_pytorch import Rin, RinDiffusionModel, Trainer
 
+imagenet_root = "/home/stud/ljul/storage/group/dataset_mirrors/imagenet2012/imagenet2012_download/train"
+
 
 class FlexibleCIFAR10(Dataset):
     def __init__(
@@ -51,18 +53,18 @@ class FlexibleCIFAR10(Dataset):
 
 config = dict(
     rin=dict(
-        num_layers="2,2,2",
+        num_layers="4,4,4,4,4,4",
         latent_slots=128,
         latent_dim=512,
         latent_mlp_ratio=4,
         latent_num_heads=16,
-        tape_dim=256,
-        tape_mlp_ratio=2,
-        rw_num_heads=8,
-        image_height=32,
-        image_width=32,
+        tape_dim=512,
+        tape_mlp_ratio=4,
+        rw_num_heads=16,
+        image_height=128,
+        image_width=128,
         image_channels=3,
-        patch_size=2,
+        patch_size=4,
         latent_pos_encoding="learned",
         tape_pos_encoding="learned",
         drop_path=0.1,
@@ -77,7 +79,7 @@ config = dict(
         cond_proj=True,
         cond_decoupled_read=False,
         xattn_enc_ln=False,
-        num_classes=10,
+        num_classes=1000,
     ),
     diffusion=dict(
         train_schedule="sigmoid@-3,3,0.9",
@@ -85,16 +87,17 @@ config = dict(
         pred_type="eps",
         self_cond="latent",
         loss_type="eps",
+        num_classes=1000,
     ),
     trainer=dict(
-        num_classes=10,
-        train_num_steps=150_000,
-        train_batch_size=256,
+        num_classes=1000,
+        train_num_steps=220_000,
+        train_batch_size=128,
         split_batches=True,
         fp16=False,
         amp=False,
         lr_scheduler_name="cosine",
-        lr=3e-3,
+        lr=0.002,
         lr_warmup_steps=10_000,
         optimizer_name="lamb",
         optimizer_exclude_weight_decay=["bias", "beta", "gamma"],
@@ -105,28 +108,40 @@ config = dict(
         ema_decay=0.9999,
         ema_update_every=1,
         sampling_kwargs=dict(iterations=100, method="ddim"),
-        checkpoint_folder="results/cifar10",
-        run_name="rin_cifar10",
-        log_to_wandb=False,
+        checkpoint_folder="/home/stud/ljul/storage/user/imagenet/",
+        run_name="rin",
+        log_to_wandb=True,
+        gradient_accumulation_steps=8,
     ),
 )
 
 
 rin = Rin(**config["rin"]).cuda()
-rin.pass_dummy_data(num_classes=10)  # populate lazy model with weights
+rin.pass_dummy_data(num_classes=1000)  # populate lazy model with weights
 diffusion_model = RinDiffusionModel(rin=rin, **config["diffusion"])
 
 rin_ema = Rin(**config["rin"]).cuda()
-rin_ema.pass_dummy_data(num_classes=10)
+rin_ema.pass_dummy_data(num_classes=1000)
 ema_diffusion_model = RinDiffusionModel(rin=rin_ema, **config["diffusion"])
 
 
-dataset = FlexibleCIFAR10(
-    "datasets/cifar10_flex",
-    train=True,
+# dataset = FlexibleCIFAR10(
+#     "datasets/cifar10_flex",
+#     train=True,
+#     transform=torchvision.transforms.Compose(
+#         [
+#             torchvision.transforms.Resize((32, 32)),
+#             torchvision.transforms.RandomHorizontalFlip(),
+#             torchvision.transforms.ToTensor(),
+#         ]
+#     ),
+# )
+
+dataset = torchvision.datasets.ImageFolder(
+    root=imagenet_root,
     transform=torchvision.transforms.Compose(
         [
-            torchvision.transforms.Resize((32, 32)),
+            torchvision.transforms.Resize((128, 128)),
             torchvision.transforms.RandomHorizontalFlip(),
             torchvision.transforms.ToTensor(),
         ]
