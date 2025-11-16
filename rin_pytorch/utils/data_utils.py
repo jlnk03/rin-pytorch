@@ -34,14 +34,34 @@ def patchify(x: torch.Tensor, patch_size: int) -> torch.Tensor:
     return patches
 
 
+def unpatchify(patches: torch.Tensor, patch_size: int, channels: int, height: int, width: int) -> torch.Tensor:
+    """
+    Inverse of `patchify`. Converts flattened patch tokens back to BCHW images.
+    """
+    bsz, num_patches, patch_dim = patches.shape
+    expected_dim = patch_size * patch_size * channels
+    if patch_dim != expected_dim:
+        raise ValueError(f"Patch dimension mismatch. Expected {expected_dim}, got {patch_dim}.")
+
+    nh = height // patch_size
+    nw = width // patch_size
+    if nh * nw != num_patches:
+        raise ValueError("Target height/width and patch count are inconsistent.")
+
+    patches = patches.view(bsz, nh, nw, patch_size, patch_size, channels)
+    patches = patches.permute(0, 5, 1, 3, 2, 4).contiguous()
+    images = patches.view(bsz, channels, height, width)
+    return images
+
+
 def pad_to_max_size(batch, patch_size: int, tape_dim: int, transform=None):
     if not batch:
         raise ValueError("Empty batch encountered in pad_to_max_size")
 
-    processed_images = []
-    valid_sizes = []
-    rounded_sizes = []
     labels = []
+    token_sequences = []
+    token_pos_sequences = []
+    token_counts = []
 
     for example in batch:
         if isinstance(example, dict):
@@ -69,62 +89,38 @@ def pad_to_max_size(batch, patch_size: int, tape_dim: int, transform=None):
         if pad_h or pad_w:
             image = F.pad(image, (0, pad_w, 0, pad_h))
 
-        processed_images.append(image)
-        valid_sizes.append((h, w))
-        rounded_sizes.append((image.shape[1], image.shape[2]))
         labels.append(int(label))
+        nh = image.shape[1] // patch_size
+        nw = image.shape[2] // patch_size
+        tokens = patchify(image, patch_size)
+        pos = create_2d_sin_cos_pos_emb(nh, nw, tape_dim).view(-1, tape_dim)
+        token_sequences.append(tokens)
+        token_pos_sequences.append(pos)
+        token_counts.append(tokens.size(0))
 
-    max_height = max(h for h, _ in rounded_sizes)
-    max_width = max(w for _, w in rounded_sizes)
-    max_nh = max_height // patch_size
-    max_nw = max_width // patch_size
-    max_tokens = max_nh * max_nw
-    max_pixels = max_height * max_width
+    max_seq_len = max(token_counts)
 
-    padded_tokens = []
-    patch_masks = []
-    image_masks = []
-    pos_embs = []
-    padded_images = []
+    padded_tokens_seq = []
+    token_masks = []
+    token_pos_embs = []
 
-    for image, (valid_h, valid_w), (rounded_h, rounded_w) in zip(processed_images, valid_sizes, rounded_sizes):
-        nh = rounded_h // patch_size
-        nw = rounded_w // patch_size
-        patches = patchify(image, patch_size)
-        token_count = nh * nw
-        pad_tokens = max_tokens - token_count
-        if pad_tokens:
-            patches = F.pad(patches, (0, 0, 0, pad_tokens))
+    for tokens, pos_seq, token_count in zip(token_sequences, token_pos_sequences, token_counts):
+        seq_pad = max_seq_len - token_count
+        seq_tokens = tokens if seq_pad == 0 else F.pad(tokens, (0, 0, 0, seq_pad))
+        seq_pos = pos_seq if seq_pad == 0 else F.pad(pos_seq, (0, 0, 0, seq_pad))
 
-        patch_mask = torch.zeros(max_tokens, dtype=torch.bool)
-        patch_mask[:token_count] = True
+        token_mask = torch.ones(max_seq_len, dtype=torch.bool)
+        token_mask[:token_count] = False
 
-        pos_emb = create_2d_sin_cos_pos_emb(nh, nw, tape_dim)
-        if pad_tokens:
-            pos_emb = F.pad(pos_emb, (0, 0, 0, pad_tokens))
-
-        pad_h = max_height - rounded_h
-        pad_w = max_width - rounded_w
-        padded_image = image if (pad_h == 0 and pad_w == 0) else F.pad(image, (0, pad_w, 0, pad_h))
-
-        pixel_mask = torch.zeros(max_pixels, dtype=torch.bool)
-        pixel_mask[: valid_h * valid_w] = True
-
-        padded_tokens.append(patches)
-        patch_masks.append(patch_mask)
-        image_masks.append(pixel_mask)
-        pos_embs.append(pos_emb)
-        padded_images.append(padded_image)
+        padded_tokens_seq.append(seq_tokens)
+        token_masks.append(token_mask)
+        token_pos_embs.append(seq_pos)
 
     batch_dict = {
-        "patches": torch.stack(padded_tokens),
-        "patch_mask": torch.stack(patch_masks),
-        "image_mask": torch.stack(image_masks),
+        "patches": torch.stack(padded_tokens_seq),
+        "patch_mask": torch.stack(token_masks),
+        "token_pos_embs": torch.stack(token_pos_embs),
         "labels": torch.tensor(labels, dtype=torch.long),
-        "pos_embs": torch.stack(pos_embs),
-        "nmh": max_nh,
-        "nmw": max_nw,
-        "images": torch.stack(padded_images),
     }
 
     return batch_dict

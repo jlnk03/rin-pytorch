@@ -11,6 +11,7 @@ from tqdm import tqdm
 from torch.profiler import ProfilerActivity, profile
 
 from .RinDiffusionModel import RinDiffusionModel
+from .utils.data_utils import pad_to_max_size
 from .utils.optimization_utils import (
     build_parameters_mapping,
     get_optimizer,
@@ -67,6 +68,15 @@ class Trainer:
         self.sampling_kwargs = sampling_kwargs
         self.gradient_accumulation_steps = max(1, gradient_accumulation_steps)
 
+        patch_size = self.diffusion_model.denoiser.patch_size
+        tape_dim = self.diffusion_model.denoiser.tape_dim
+
+        collate_fn = lambda batch: pad_to_max_size(
+            batch,
+            patch_size=patch_size,
+            tape_dim=tape_dim,
+        )
+
         dl = DataLoader(
             dataset,
             batch_size=train_batch_size,
@@ -75,6 +85,7 @@ class Trainer:
             pin_memory=True,
             persistent_workers=True,
             drop_last=True,
+            collate_fn=collate_fn,
         )
 
         dl = self.accelerator.prepare(dl)
@@ -166,7 +177,11 @@ class Trainer:
             desc="Training",
         ) as pbar:
             while self.step < self.train_num_steps:
-                batch_img, batch_class = next(self.dl)
+                batch = next(self.dl)
+                batch_tokens = batch["patches"]
+                batch_mask = batch.get("patch_mask")
+                batch_pos = batch.get("token_pos_embs")
+                batch_class = batch["labels"]
                 batch_class = torch.nn.functional.one_hot(batch_class, num_classes=self.num_classes).float()
 
                 self.optimizer.zero_grad()
@@ -187,7 +202,12 @@ class Trainer:
                     profiling_active = True
 
                 with profiler_ctx as prof:
-                    loss = self.diffusion_model(batch_img, batch_class)
+                    loss = self.diffusion_model(
+                        batch_tokens,
+                        batch_class,
+                        attn_mask=batch_mask,
+                        tape_pos_emb=batch_pos,
+                    )
                     self.accelerator.backward(loss)
 
                 if self.clip_grad_norm is not None:

@@ -51,7 +51,8 @@ class Rin(torch.nn.Module):
         self._n_cols = image_width // patch_size
         self._num_tokens = self._n_rows * self._n_cols
         self._patch_size = patch_size
-        self._output_dim = patch_size**2 * image_channels
+        self._patch_dim = patch_size**2 * image_channels
+        self._output_dim = self._patch_dim
 
         self._num_layers = [int(i) for i in num_layers.split(",")]
         self._latent_slots = latent_slots
@@ -70,6 +71,7 @@ class Rin(torch.nn.Module):
         self._self_cond = self_cond
         self._cond_tape_writable = cond_tape_writable
         self._cond_decoupled_read = cond_decoupled_read
+        self.token_proj = torch.nn.Linear(self._patch_dim, tape_dim)
         self.stem_ln = torch.nn.LayerNorm(tape_dim, eps=1e-6)
         self.time_emb = ScalarEmbedding(
             dim=(latent_dim if self._time_on_latent else cond_dim) // 4,
@@ -179,15 +181,6 @@ class Rin(torch.nn.Module):
         self.output_ln = torch.nn.LayerNorm(tape_dim, eps=1e-6)
         self.output_linear = torch.nn.Linear(tape_dim, self._output_dim)
 
-        self.stem = torch.nn.Conv2d(
-            in_channels=image_channels,
-            out_channels=tape_dim, 
-            kernel_size=patch_size,
-            stride=patch_size,
-            padding=0,
-            bias=True
-        )
-
     def make_latent_pos(
         self,
         latent_slots: int,
@@ -237,6 +230,14 @@ class Rin(torch.nn.Module):
         else:
             raise ValueError(f"Unknown tape_pos_encoding `{tape_pos_encoding}`")
 
+    def _get_base_tape_pos(self, length: int) -> torch.Tensor:
+        tape_pos = rearrange(self.tape_pos_emb, "n d -> 1 n d")
+        if self._tape_pos_encoding in ["sin_cos_plus_learned"]:
+            tape_pos = tape_pos + rearrange(self.tape_pos_emb_res, "n d -> 1 n d")
+        if tape_pos.size(1) < length:
+            raise ValueError("Base positional embeddings shorter than requested length.")
+        return tape_pos[:, :length]
+
     def initialize_cond(
         self,
         t: torch.Tensor | None,
@@ -253,7 +254,7 @@ class Rin(torch.nn.Module):
 
     def initialize_tape(
         self,
-        x: torch.Tensor,
+        tokens: torch.Tensor,
         time_emb: torch.Tensor | None,
         cond: torch.Tensor | None,
         tape_prev: torch.Tensor | None,
@@ -265,17 +266,19 @@ class Rin(torch.nn.Module):
         if not self._cond_on_latent and cond is not None:
             tape_r = _concat_tokens(tape_r, cond)
 
-        tape = self.stem(x)
-        tape = rearrange(tape, "b d h w -> b (h w) d")
+        if tokens.ndim != 3:
+            raise ValueError("Tokens must be a B x T x D tensor.")
+        tape = self.token_proj(tokens)
+        tape_len = tape.size(1)
 
         if external_tape_pos is not None:
             tape_pos_emb = external_tape_pos
+            if tape_pos_emb.ndim == 2:
+                tape_pos_emb = tape_pos_emb.unsqueeze(0)
             if tape_pos_emb.shape[:2] != tape.shape[:2]:
                 raise ValueError("External tape positional embeddings must match tape tokens.")
         else:
-            tape_pos_emb = rearrange(self.tape_pos_emb, "n d -> 1 n d")
-            if self._tape_pos_encoding in ["sin_cos_plus_learned"]:
-                tape_pos_emb += rearrange(self.tape_pos_emb_res, "n d -> 1 n d")
+            tape_pos_emb = self._get_base_tape_pos(tape_len)
 
         tape_pos_emb = tape_pos_emb.to(tape.device)
         tape = self.stem_ln(tape) + tape_pos_emb
@@ -344,15 +347,7 @@ class Rin(torch.nn.Module):
         return latent, tape
 
     def readout_tape(self, tape: torch.Tensor) -> torch.Tensor:
-        tokens = self.output_linear(self.output_ln(tape[:, : self._num_tokens]))
-        tokens = rearrange(
-            tokens,
-            "b (h w) (p1 p2 c) -> b c (h p1) (w p2)",
-            h=self._n_rows,
-            w=self._n_cols,
-            p1=self._patch_size,
-            p2=self._patch_size,
-        )
+        tokens = self.output_linear(self.output_ln(tape))
         return tokens
 
     @property
@@ -362,6 +357,18 @@ class Rin(torch.nn.Module):
     @property
     def tape_shape(self) -> list[int]:
         return [self._tape_slots, self._tape_dim]
+
+    @property
+    def tape_dim(self) -> int:
+        return self._tape_dim
+
+    @property
+    def patch_size(self) -> int:
+        return self._patch_size
+
+    @property
+    def patch_dim(self) -> int:
+        return self._patch_dim
 
     @property
     def image_shape(self) -> list[int]:
@@ -377,10 +384,13 @@ class Rin(torch.nn.Module):
         was_training = self.training
         self.eval()
 
+        dummy_tokens = torch.zeros([1, self._num_tokens, self._patch_dim], device=self.device)
+        tape_pos = self._get_base_tape_pos(self._num_tokens)
         self(
-            x=torch.zeros([1, *self.image_shape], device=self.device),
+            x=dummy_tokens,
             t=0.0,
             cond=None if num_classes is None else torch.zeros([1, num_classes], device=self.device),
+            tape_pos_emb=tape_pos,
         )
 
         self.train(was_training)
@@ -395,15 +405,10 @@ class Rin(torch.nn.Module):
         tape_padding_mask: torch.Tensor | None = None,
         tape_pos_emb: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        assert x.ndim == 4
+        if x.ndim != 3:
+            raise ValueError("Input tokens must be a B x T x D tensor.")
         bs = x.shape[0]
-
-        nmh = x.shape[2]
-        nmw = x.shape[3]
-        
-        self._n_rows = nmh // self._patch_size
-        self._n_cols = nmw // self._patch_size
-        self._num_tokens = self._n_rows * self._n_cols
+        seq_len = x.shape[1]
 
         if isinstance(t, float) or t.ndim == 0:
             t = torch.full((bs,), t, device=x.device, dtype=torch.float32)
@@ -412,7 +417,7 @@ class Rin(torch.nn.Module):
             latent_prev = torch.zeros(bs, *self.latent_shape, device=x.device)
 
         if tape_prev is None:
-            tape_prev = torch.zeros(bs, *self.tape_shape, device=x.device)
+            tape_prev = torch.zeros(bs, seq_len, self._tape_dim, device=x.device)
 
         if self._cond_on_latent and cond is None:
             raise ValueError("cond is None but cond_on_latent is True")
@@ -423,10 +428,10 @@ class Rin(torch.nn.Module):
         latent = self.initialize_latent(bs, time_emb, cond, latent_prev)
         tape_key_padding_mask = None
         if tape_padding_mask is not None:
-            tape_key_padding_mask = (~tape_padding_mask.bool()).to(x.device)
+            tape_key_padding_mask = tape_padding_mask.bool().to(x.device)
         latent, tape = self.compute(latent, tape, tape_r, tape_key_padding_mask)
         x = self.readout_tape(tape)
-        return x, latent, tape[:, : self._tape_slots]
+        return x, latent, tape
 
     def load_weights_numpy(self, np_file):
         # load weights from numpy file relying on the order of parameters

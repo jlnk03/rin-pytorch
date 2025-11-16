@@ -79,6 +79,9 @@ class TransformerDecoderLayer(torch.nn.Module):
         enc: torch.Tensor,
         enc_key_padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if enc_key_padding_mask is not None:
+            # PyTorch expects True for padded (ignored) positions.
+            enc_key_padding_mask = enc_key_padding_mask.bool()
         if self.self_attention:
             x_ln = self.self_ln(x)
             x_res, _ = self.self_mha(x_ln, x_ln, x_ln, need_weights=False)

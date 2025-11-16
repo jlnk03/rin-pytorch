@@ -217,17 +217,15 @@ def build_dataloader(config, data_root: str):
         )
 
     if is_cifar:
-        dataset = FlexibleCIFAR10(root_dir=data_root, train=True, transform=transform)
+        dataset = FlexibleCIFAR10(root_dir=data_root, train=False, transform=transform)
     else:
         dataset = torchvision.datasets.ImageFolder(root=data_root, transform=transform)
 
-    collate_fn = None
-    if is_cifar or not vanilla_imagenet:
-        collate_fn = lambda batch: pad_to_max_size(
-            batch,
-            patch_size=rin_cfg["patch_size"],
-            tape_dim=rin_cfg["tape_dim"],
-        )
+    collate_fn = lambda batch: pad_to_max_size(
+        batch,
+        patch_size=rin_cfg["patch_size"],
+        tape_dim=rin_cfg["tape_dim"],
+    )
 
     return DataLoader(
         dataset,

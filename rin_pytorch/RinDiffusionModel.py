@@ -3,6 +3,7 @@ from tqdm import tqdm
 
 from .Rin import Rin
 from .utils import diffusion_utils
+from .utils.data_utils import unpatchify
 from .utils.pos_embedding import create_2d_sin_cos_pos_emb
 
 
@@ -69,9 +70,16 @@ class RinDiffusionModel(torch.nn.Module):
         tape_pos_emb: torch.Tensor | None = None,
     ):
         channels, default_height, default_width = self.denoiser.image_shape
+        patch_size = self.denoiser.patch_size
+        patch_dim = self.denoiser.patch_dim
         target_height = image_height if image_height is not None else default_height
         target_width = image_width if image_width is not None else default_width
-        samples_shape = [num_samples, channels, target_height, target_width]
+        if target_height % patch_size != 0 or target_width % patch_size != 0:
+            raise ValueError("image_height and image_width must be divisible by patch size.")
+        nh = target_height // patch_size
+        nw = target_width // patch_size
+        seq_len = nh * nw
+        samples_shape = [num_samples, seq_len, patch_dim]
         device = self.denoiser.device
         if self._conditional == "class":
             # generate random classes
@@ -86,7 +94,7 @@ class RinDiffusionModel(torch.nn.Module):
         else:
             cond = None
 
-        get_step = lambda t: torch.full([num_samples, 1, 1, 1], 1.0 - t / iterations, device=device)
+        get_step = lambda t: torch.full([num_samples, 1, 1], 1.0 - t / iterations, device=device)
         if self._inference_schedule is None:
             time_transform = self.scheduler.time_transform
         else:
@@ -105,23 +113,17 @@ class RinDiffusionModel(torch.nn.Module):
                 pos_emb = pos_emb.repeat(num_samples, 1, 1)
             if pos_emb.size(0) != num_samples:
                 raise ValueError("tape_pos_emb batch dimension must equal num_samples or be 1.")
+            if pos_emb.size(1) != seq_len:
+                raise ValueError("tape_pos_emb sequence length must match target sequence length.")
             return pos_emb
-
-        patch_size = self.denoiser.stem.kernel_size
-        if isinstance(patch_size, tuple):
-            patch_size = patch_size[0]
 
         auto_pos_emb = None
         if tape_pos_emb is not None:
             auto_pos_emb = _prepare_pos_emb(tape_pos_emb)
-        elif image_height is not None or image_width is not None:
-            if target_height % patch_size != 0 or target_width % patch_size != 0:
-                raise ValueError("image_height and image_width must be divisible by patch size.")
-            nh = target_height // patch_size
-            nw = target_width // patch_size
-            tape_dim_value = tape_dim if tape_dim is not None else self.denoiser.tape_shape[-1]
-            base_pos = create_2d_sin_cos_pos_emb(nh, nw, tape_dim_value)
-            auto_pos_emb = base_pos.unsqueeze(0).repeat(num_samples, 1, 1)
+        else:
+            tape_dim_value = tape_dim if tape_dim is not None else self.denoiser.tape_dim
+            base_pos = create_2d_sin_cos_pos_emb(nh, nw, tape_dim_value).view(1, seq_len, tape_dim_value)
+            auto_pos_emb = base_pos.repeat(num_samples, 1, 1)
 
         if auto_pos_emb is not None:
             auto_pos_emb = auto_pos_emb.to(device)
@@ -130,7 +132,7 @@ class RinDiffusionModel(torch.nn.Module):
             torch.arange(iterations, dtype=torch.float32, device=device), desc="sampling", leave=False, position=1
         ):
             time_step = get_step(t)
-            time_step_p = torch.max(get_step(t + 1), torch.tensor(0.0))
+            time_step_p = torch.max(get_step(t + 1), torch.tensor(0.0, device=device))
             gamma, gamma_prev = time_transform(time_step), time_transform(time_step_p)
 
             pred_out, latent_prev, tape_prev = self.denoise(
@@ -154,39 +156,38 @@ class RinDiffusionModel(torch.nn.Module):
                 sampler_name=method,
             )
 
-        samples = data_pred * 0.5 + 0.5  # convert -1,1 -> 0,1
-        samples.clamp_(0.0, 1.0)
-
-        return samples
+        tokens = data_pred * 0.5 + 0.5  # convert -1,1 -> 0,1
+        tokens.clamp_(0.0, 1.0)
+        images = unpatchify(tokens, patch_size, channels, target_height, target_width)
+        return images
 
     def noise_denoise(
         self,
-        images: torch.Tensor,
+        tokens: torch.Tensor,
         labels: torch.Tensor,
         t: torch.Tensor | None = None,
         attn_mask: torch.Tensor | None = None,
         tape_pos_emb: torch.Tensor | None = None,
     ):
-        images = images * 2.0 - 1.0
-        images_noised, noise, _, gamma = self.scheduler.add_noise(images, t=t)
+        tokens = tokens * 2.0 - 1.0
+        tokens_noised, noise, _, gamma = self.scheduler.add_noise(tokens, t=t)
 
-        bsz = images.size(0)
-        latent_prev = torch.zeros((bsz, *self.denoiser.latent_shape), device=images.device)
-        tape_prev = torch.zeros((bsz, *self.denoiser.tape_shape), device=images.device)
+        bsz, seq_len, _ = tokens.size()
+        latent_prev = torch.zeros((bsz, *self.denoiser.latent_shape), device=tokens.device)
+        tape_prev = torch.zeros((bsz, seq_len, self.denoiser.tape_dim), device=tokens.device)
 
         if attn_mask is not None:
-            attn_mask = attn_mask.to(images.device)
-            attn_mask = attn_mask.bool()
+            attn_mask = attn_mask.to(tokens.device).bool()
         if tape_pos_emb is not None:
-            tape_pos_emb = tape_pos_emb.to(images.device)
+            tape_pos_emb = tape_pos_emb.to(tokens.device)
 
         if self._self_cond != "none" and self._self_cond_rate > 0.0:
-            mask = torch.rand(bsz) < self._self_cond_rate
+            mask = torch.rand(bsz, device=tokens.device) < self._self_cond_rate
 
             if torch.any(mask):
                 with torch.no_grad():
                     _, latent_prev_out, tape_prev_out = self.denoise(
-                        x=images_noised[mask],
+                        x=tokens_noised[mask],
                         gamma=gamma[mask],
                         cond=labels[mask],
                         tape_padding_mask=attn_mask[mask] if attn_mask is not None else None,
@@ -197,7 +198,7 @@ class RinDiffusionModel(torch.nn.Module):
                 tape_prev[mask] = tape_prev_out.detach()
 
         denoise_out, _, _ = self.denoise(
-            images_noised,
+            tokens_noised,
             gamma,
             labels,
             latent_prev,
@@ -207,38 +208,53 @@ class RinDiffusionModel(torch.nn.Module):
         )
 
         pred_dict = diffusion_utils.get_x0_eps(
-            images_noised, gamma, denoise_out, self._pred_type, truncate_noise=False, clip_x0=True
+            tokens_noised, gamma, denoise_out, self._pred_type, truncate_noise=False, clip_x0=True
         )
-        return images, noise, images_noised, pred_dict
+        return tokens, noise, tokens_noised, pred_dict
 
     def compute_loss(
         self,
-        images: torch.Tensor,
+        data: torch.Tensor,
         noise: torch.Tensor,
         pred_dict: dict[str, torch.Tensor],
+        mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self._loss_type == "x":
-            loss = torch.nn.functional.mse_loss(images, pred_dict["data_pred"])
+            target = data
+            pred = pred_dict["data_pred"]
         elif self._loss_type == "eps":
-            loss = torch.nn.functional.mse_loss(noise, pred_dict["noise_pred"])
+            target = noise
+            pred = pred_dict["noise_pred"]
         else:
             raise ValueError(f"Unknown loss_type `{self._pred_type}`")
+
+        diff = torch.nn.functional.mse_loss(pred, target, reduction="none")
+        if mask is not None:
+            weight = (~mask).float().unsqueeze(-1)
+            diff = diff * weight
+            denom = (weight.sum() * diff.size(-1)).clamp(min=1.0)
+            loss = diff.sum() / denom
+        else:
+            loss = diff.mean()
         return loss
 
     def forward(
         self,
-        images: torch.Tensor,
+        tokens: torch.Tensor,
         labels: torch.Tensor,
         t: torch.Tensor | None = None,
         attn_mask: torch.Tensor | None = None,
         tape_pos_emb: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        images, noise, _, pred_dict = self.noise_denoise(
-            images,
+        mask = attn_mask
+        if mask is not None:
+            mask = mask.to(tokens.device).bool()
+        data, noise, _, pred_dict = self.noise_denoise(
+            tokens,
             labels,
             t=t,
-            attn_mask=attn_mask,
+            attn_mask=mask,
             tape_pos_emb=tape_pos_emb,
         )
-        loss = self.compute_loss(images, noise, pred_dict)
+        loss = self.compute_loss(data, noise, pred_dict, mask=mask)
         return loss
