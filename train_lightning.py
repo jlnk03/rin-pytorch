@@ -121,7 +121,6 @@ def main():
     accelerator = "gpu" if torch.cuda.is_available() else "cpu"
     devices = torch.cuda.device_count() if accelerator == "gpu" else 1
     devices = max(1, devices)
-    accumulate = max(1, config["trainer"].get("gradient_accumulation_steps", 1))
     precision = "bf16" if config["trainer"].get("fp16", False) else "32-true"
 
     trainer = pl.Trainer(
@@ -132,7 +131,6 @@ def main():
         devices=devices,
         precision=precision,
         strategy="ddp_find_unused_parameters_true" if devices > 1 else "auto",
-        accumulate_grad_batches=accumulate,
         log_every_n_steps=config["trainer"].get("log_every_n_steps", 50),
     )
 
