@@ -97,10 +97,10 @@ class RinDiffusionModel(torch.nn.Module):
         else:
             cond = None
 
-        samples = self.scheduler.sample_noise([num_samples, channels, target_height, target_width], device=device, seed=seed)
-        samples = patchify(samples, patch_size)
-
-        samples_list = [samples[i] for i in range(num_samples)]
+        noise_images = self.scheduler.sample_noise(
+            [num_samples, channels, target_height, target_width], device=device, seed=seed
+        )
+        samples_list = [patchify(noise_images[i], patch_size) for i in range(num_samples)]
         samples_flat, offsets = ragged_list_to_tensor(samples_list)
         offsets = offsets.to(device)
         offsets_pos_embs = offsets.clone()

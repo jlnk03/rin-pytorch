@@ -5,6 +5,7 @@ from typing import Optional, Tuple
 import torch
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
+from torch._dynamo import mark_dynamic
 
 torch._dynamo.config.recompile_limit = 32
 
@@ -147,10 +148,14 @@ class FlexMultiheadAttention(nn.Module):
             value_states = nn.functional.linear(value, self.v_proj_weight, b_v)
 
         query_states = query_states.view(batch_size, l_query, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(batch_size, key_states.shape[1], self.num_kv_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(batch_size, value_states.shape[1], self.num_kv_heads, self.head_dim).transpose(
-            1, 2
-        )
+        key_len = key_states.shape[1]
+        value_len = value_states.shape[1]
+        key_states = key_states.view(batch_size, key_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        value_states = value_states.view(batch_size, value_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
+
+        mark_dynamic(query_states, 2)
+        mark_dynamic(key_states, 2)
+        mark_dynamic(value_states, 2)
 
         score_mod = None
         if attn_mask is not None:
