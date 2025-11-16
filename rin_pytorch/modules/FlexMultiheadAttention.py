@@ -6,6 +6,12 @@ import torch
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
 
+torch._dynamo.config.recompile_limit = 32
+
+flex_attention = torch.compile(flex_attention, dynamic=True)
+
+create_block_mask = torch.compile(create_block_mask, dynamic=True)
+
 
 def create_document_block_mask(
     document_ids: torch.Tensor | None,

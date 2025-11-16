@@ -9,5 +9,5 @@
 
 echo "Starting the job"
 echo "Job ID: $SLURM_JOB_ID"
-srun python train_lightning.py --config configs/cifar.yaml
+srun python train_lightning.py --config configs/128.yaml
 echo "Job finished"
