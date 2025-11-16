@@ -89,6 +89,8 @@ def sample_from_config(
         num_classes=rin_config["num_classes"],
     )
 
+    print(f"num classes: {rin_config['num_classes']}")
+
     # Initialize diffusion model from config
     diffusion_config = config["diffusion"]
     ema_diffusion_model = RinDiffusionModel(
@@ -98,6 +100,7 @@ def sample_from_config(
         pred_type=diffusion_config["pred_type"],
         self_cond=diffusion_config["self_cond"],
         loss_type=diffusion_config["loss_type"],
+        num_classes=diffusion_config.get("num_classes", rin_config["num_classes"]),
     )
 
     # Move model to GPU if available
