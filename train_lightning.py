@@ -3,9 +3,6 @@ from datetime import datetime
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader
-import torchvision
-from torchvision import transforms
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
@@ -14,8 +11,7 @@ from pytorch_lightning.loggers import WandbLogger
 import yaml
 
 from rin_pytorch.TrainerLightning import RinLightningModule
-
-DEFAULT_IMAGENET_ROOT = "/home/stud/ljul/storage/group/dataset_mirrors/imagenet2012/imagenet2012_download/train"
+from rin_pytorch.data import build_training_dataloader, resolve_data_root
 
 torch.set_float32_matmul_precision("medium")
 
@@ -24,31 +20,6 @@ def load_config(config_file):
     with open(config_file, "r") as f:
         config = yaml.safe_load(f)
     return config
-
-
-def build_dataloader(config, data_root: str):
-    rin_cfg = config["rin"]
-    trainer_cfg = config["trainer"]
-
-    transform = transforms.Compose(
-        [
-            transforms.Resize((rin_cfg["image_height"], rin_cfg["image_width"])),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-        ]
-    )
-
-    dataset = torchvision.datasets.ImageFolder(root=data_root, transform=transform)
-
-    return DataLoader(
-        dataset,
-        batch_size=trainer_cfg["train_batch_size"],
-        shuffle=True,
-        num_workers=trainer_cfg["num_dl_workers"],
-        pin_memory=True,
-        persistent_workers=trainer_cfg["num_dl_workers"] > 0,
-        drop_last=True,
-    )
 
 
 def main():
@@ -81,7 +52,7 @@ def main():
 
     config = load_config(args.config)
 
-    data_root = args.data_root or config["trainer"].get("dataset_root", DEFAULT_IMAGENET_ROOT)
+    data_root = resolve_data_root(args.data_root, config)
 
     checkpoint_root = Path(config["trainer"]["checkpoint_folder"])
     checkpoint_root.mkdir(parents=True, exist_ok=True)
@@ -91,7 +62,7 @@ def main():
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     config["trainer"]["checkpoint_folder"] = str(checkpoint_dir)
 
-    train_loader = build_dataloader(config, data_root)
+    train_loader = build_training_dataloader(config, data_root)
 
     wandb_logger = (
         WandbLogger(

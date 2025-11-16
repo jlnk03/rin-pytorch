@@ -38,20 +38,10 @@ class RinDiffusionModel(torch.nn.Module):
         cond: torch.Tensor | None,
         latent_prev: torch.Tensor | None = None,
         tape_prev: torch.Tensor | None = None,
-        tape_padding_mask: torch.Tensor | None = None,
-        tape_pos_emb: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         gamma = gamma.squeeze()
         assert gamma.ndim == 1
-        output, latent, tape = self.denoiser(
-            x,
-            gamma,
-            cond,
-            latent_prev,
-            tape_prev,
-            tape_padding_mask=tape_padding_mask,
-            tape_pos_emb=tape_pos_emb,
-        )
+        output, latent, tape = self.denoiser(x, gamma, cond, latent_prev, tape_prev)
         return output, latent, tape
 
     @torch.no_grad()
@@ -113,8 +103,6 @@ class RinDiffusionModel(torch.nn.Module):
         images: torch.Tensor,
         labels: torch.Tensor,
         t: torch.Tensor | None = None,
-        attn_mask: torch.Tensor | None = None,
-        tape_pos_emb: torch.Tensor | None = None,
     ):
         images = images * 2.0 - 1.0
         images_noised, noise, _, gamma = self.scheduler.add_noise(images, t=t)
@@ -122,13 +110,6 @@ class RinDiffusionModel(torch.nn.Module):
         bsz = images.size(0)
         latent_prev = torch.zeros((bsz, *self.denoiser.latent_shape), device=images.device)
         tape_prev = torch.zeros((bsz, *self.denoiser.tape_shape), device=images.device)
-
-        if attn_mask is not None:
-            attn_mask = attn_mask.to(images.device)
-            attn_mask = attn_mask.bool()
-        if tape_pos_emb is not None:
-            tape_pos_emb = tape_pos_emb.to(images.device)
-
         if self._self_cond != "none" and self._self_cond_rate > 0.0:
             mask = torch.rand(bsz) < self._self_cond_rate
 
@@ -138,22 +119,12 @@ class RinDiffusionModel(torch.nn.Module):
                         x=images_noised[mask],
                         gamma=gamma[mask],
                         cond=labels[mask],
-                        tape_padding_mask=attn_mask[mask] if attn_mask is not None else None,
-                        tape_pos_emb=tape_pos_emb[mask] if tape_pos_emb is not None else None,
                     )
 
                 latent_prev[mask] = latent_prev_out.detach()
                 tape_prev[mask] = tape_prev_out.detach()
 
-        denoise_out, _, _ = self.denoise(
-            images_noised,
-            gamma,
-            labels,
-            latent_prev,
-            tape_prev,
-            tape_padding_mask=attn_mask,
-            tape_pos_emb=tape_pos_emb,
-        )
+        denoise_out, _, _ = self.denoise(images_noised, gamma, labels, latent_prev, tape_prev)
 
         pred_dict = diffusion_utils.get_x0_eps(
             images_noised, gamma, denoise_out, self._pred_type, truncate_noise=False, clip_x0=True
@@ -179,15 +150,7 @@ class RinDiffusionModel(torch.nn.Module):
         images: torch.Tensor,
         labels: torch.Tensor,
         t: torch.Tensor | None = None,
-        attn_mask: torch.Tensor | None = None,
-        tape_pos_emb: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        images, noise, _, pred_dict = self.noise_denoise(
-            images,
-            labels,
-            t=t,
-            attn_mask=attn_mask,
-            tape_pos_emb=tape_pos_emb,
-        )
+        images, noise, _, pred_dict = self.noise_denoise(images, labels, t=t)
         loss = self.compute_loss(images, noise, pred_dict)
         return loss
