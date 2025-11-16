@@ -4,7 +4,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --clusters=hpda2
 #SBATCH --partition=hpda2_compute_gpu
-#SBATCH --exclude=hpdar04c05s03
+#SBATCH --exclude=hpdar04c05s03,hpdar04c03s01
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=4
 #SBATCH --gres=gpu:4
@@ -12,5 +12,6 @@
 
 echo "Starting the job"
 echo "Job ID: $SLURM_JOB_ID"
-srun python train.py --config configs/cifar.yaml --resume_checkpoint /dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/cifar/cifar_flex_ps_2_20251109_155144/last.ckpt --wandb_resume wjde77ag
+# srun python train.py --config configs/cifar.yaml --resume_checkpoint /dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/cifar/cifar_flex_ps_2_20251109_155144/last.ckpt --wandb_resume wjde77ag
+srun python train.py --config configs/cifar.yaml --resume_checkpoint /dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/cifar/cifar_sparse_ps_1_20251114_070330/last.ckpt --wandb_resume nd4ft1mf
 echo "Job finished"

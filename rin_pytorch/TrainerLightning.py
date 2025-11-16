@@ -80,7 +80,7 @@ def patchify(x: torch.Tensor, p: int) -> torch.Tensor:
     return x
 
 
-def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
+def pad_to_max_size(batch, patch_size, tape_dim, transform=None, second_patch_size=None):
     # Extract images and labels from the batch
     # images, labels = zip(*batch)
     images = []
@@ -169,24 +169,163 @@ def pad_to_max_size(batch, patch_size, tape_dim, transform=None):
     image_masks = torch.stack(image_masks).bool()
     pos_embs = torch.stack(pos_embs)
     
+    # Optionally create a second tensor with a different patch size, preserving image order
+    if second_patch_size is not None and second_patch_size != patch_size:
+        nmh2 = max_height // second_patch_size
+        nmw2 = max_width // second_patch_size
+
+        padded_images2 = []
+        for img in images:
+            c2, h2, w2 = img.shape
+            h_crop2 = h2 - (h2 // second_patch_size) * second_patch_size
+            w_crop2 = w2 - (w2 // second_patch_size) * second_patch_size
+            if h_crop2 > 0 or w_crop2 > 0:
+                img2 = img[:, :h2 - h_crop2, :w2 - w_crop2]
+                _, h2, w2 = img2.shape
+            else:
+                img2 = img
+            if c2 == 1:
+                img2 = img2.repeat(3, 1, 1)
+            nh2 = h2 // second_patch_size
+            nw2 = w2 // second_patch_size
+            pixel_row2 = patchify(img2, second_patch_size)
+            pixel_row2 = torch.nn.functional.pad(pixel_row2, (0, 0, 0, nmh2 * nmw2 - pixel_row2.shape[0]), value=0)
+            padded_images2.append(pixel_row2)
+
+        padded_images2 = torch.stack(padded_images2)
+        return padded_images, patch_masks, image_masks, labels, pos_embs, nmh, nmw, padded_images2
+
     return padded_images, patch_masks, image_masks, labels, pos_embs, nmh, nmw
 
+
+def collate_fixed_size(batch, patch_size, tape_dim, transform, image_height, image_width, second_patch_size=None):
+    # Produce fixed-size, square, non-padded tensors per config dims
+    images = []
+    labels = []
+
+    first_logged = False
+    for example in batch:
+        if example["image"].mode == "RGBA":
+            print(f"Warning: Image has 4 channels (RGBA), converting to 3")
+            example["image"] = example["image"].convert("RGB")
+        if transform:
+            example["image"] = transform(example["image"])
+
+        c, h, w = example["image"].shape
+        if c > 3:
+            print(f"Warning: Image has {c} channels, truncating to 3")
+            example["image"] = example["image"][:3]
+            c, h, w = example["image"].shape
+        if c == 1:
+            example["image"] = example["image"].repeat(3, 1, 1)
+            c, h, w = example["image"].shape
+
+        if not first_logged:
+            log_first_tensor("dataloader_sq.image_transformed", example["image"])
+            first_logged = True
+
+        # Ensure final dims are the configured ones and divisible by patch size
+        assert h == image_height and w == image_width, f"Transformed image dims {(h, w)} != {(image_height, image_width)}"
+        assert h % patch_size == 0 and w % patch_size == 0, "Image dims must be divisible by patch size"
+
+        images.append(example["image"])
+        labels.append(example["label"])
+
+    nmh = image_height // patch_size
+    nmw = image_width // patch_size
+
+    padded_images = []
+    patch_masks = []
+    image_masks = []
+    pos_embs = []
+
+    first_logged2 = False
+    for img in images:
+        c, h, w = img.shape
+        nh = h // patch_size
+        nw = w // patch_size
+
+        pixel_row = patchify(img, patch_size)
+        if not first_logged2:
+            log_first_tensor("dataloader_sq.image_patchified", pixel_row)
+
+        pos_emb = create_2d_sin_cos_pos_emb(nh, nw, tape_dim)
+
+        pixel_mask = torch.ones(h * w)
+        patch_mask = torch.ones(nh * nw)
+
+        image_masks.append(pixel_mask)
+        patch_masks.append(patch_mask)
+        padded_images.append(pixel_row)
+        pos_embs.append(pos_emb)
+
+        if not first_logged2:
+            log_first_tensor("dataloader_sq.image_masks", image_masks[-1])
+            first_logged2 = True
+
+    labels = torch.tensor(labels)
+    padded_images = torch.stack(padded_images)
+    patch_masks = torch.stack(patch_masks).bool()
+    image_masks = torch.stack(image_masks).bool()
+    pos_embs = torch.stack(pos_embs)
+
+    # Optionally create second tensor with a different patch size; images/order preserved
+    if second_patch_size is not None and second_patch_size != patch_size:
+        assert image_height % second_patch_size == 0 and image_width % second_patch_size == 0, "Configured image dims must be divisible by second_patch_size"
+        nmh2 = image_height // second_patch_size
+        nmw2 = image_width // second_patch_size
+
+        padded_images2 = []
+        first_logged3 = False
+        for img in images:
+            c2, h2, w2 = img.shape
+            if c2 == 1:
+                img = img.repeat(3, 1, 1)
+            nh2 = h2 // second_patch_size
+            nw2 = w2 // second_patch_size
+            pixel_row2 = patchify(img, second_patch_size)
+            if not first_logged3:
+                log_first_tensor("dataloader_sq.image_patchified_second", pixel_row2)
+                first_logged3 = True
+            padded_images2.append(pixel_row2)
+        padded_images2 = torch.stack(padded_images2)
+        return padded_images, patch_masks, image_masks, labels, pos_embs, nmh, nmw, padded_images2
+
+    return padded_images, patch_masks, image_masks, labels, pos_embs, nmh, nmw
 
 class ImageNetDataModule(LightningDataModule):
     def __init__(self, config):
         super().__init__()
         self.config = config
         if self.config["run"]["cifar"]:
-            self.transform = transforms.Compose([
-                transforms.RandomHorizontalFlip(),
-                transforms.ToTensor(),
-            ])
+            if self.config["run"].get("square_images"):
+                H, W = self.config["rin"]["image_height"], self.config["rin"]["image_width"]
+                self.transform = transforms.Compose([
+                    transforms.Resize(H),
+                    transforms.CenterCrop((H, W)),
+                    transforms.RandomHorizontalFlip(),
+                    transforms.ToTensor(),
+                ])
+            else:
+                self.transform = transforms.Compose([
+                    transforms.RandomHorizontalFlip(),
+                    transforms.ToTensor(),
+                ])
         else:
-            self.transform = transforms.Compose([
-                transforms.Resize((128, 128)) if self.config["run"]["vanilla"] else ResizeMaxSide(128),
-                transforms.RandomHorizontalFlip(),
-                transforms.ToTensor(),
-            ])
+            if self.config["run"].get("square_images"):
+                H, W = self.config["rin"]["image_height"], self.config["rin"]["image_width"]
+                self.transform = transforms.Compose([
+                    transforms.Resize(H),
+                    transforms.CenterCrop((H, W)),
+                    transforms.RandomHorizontalFlip(),
+                    transforms.ToTensor(),
+                ])
+            else:
+                self.transform = transforms.Compose([
+                    transforms.Resize((128, 128)) if self.config["run"]["vanilla"] else ResizeMaxSide(128),
+                    transforms.RandomHorizontalFlip(),
+                    transforms.ToTensor(),
+                ])
     
     def setup(self, stage=None):
         if self.config["run"]["cifar"]: 
@@ -201,15 +340,34 @@ class ImageNetDataModule(LightningDataModule):
             )
     
     def train_dataloader(self):
+        if self.config["run"].get("square_images"):
+            collate = lambda batch: collate_fixed_size(
+                batch,
+                self.config["rin"]["patch_size"],
+                self.config["rin"]["tape_dim"],
+                self.transform,
+                self.config["rin"]["image_height"],
+                self.config["rin"]["image_width"],
+                self.config["rin"].get("second_patch_size"),
+            )
+        else:
+            collate = lambda batch: pad_to_max_size(
+                batch,
+                self.config["rin"]["patch_size"],
+                self.config["rin"]["tape_dim"],
+                self.transform,
+                self.config["rin"].get("second_patch_size"),
+            )
+
         return DataLoader(
-            self.train_dataset,
-            batch_size=self.config["trainer"]["train_batch_size"],
-            num_workers=self.config["trainer"]["num_dl_workers"],
-            pin_memory=True,
-            persistent_workers=True,
-            drop_last=True,
-            collate_fn=lambda batch: pad_to_max_size(batch, self.config["rin"]["patch_size"], self.config["rin"]["tape_dim"], self.transform),
-            shuffle=False,
+                self.train_dataset,
+                batch_size=self.config["trainer"]["train_batch_size"],
+                num_workers=self.config["trainer"]["num_dl_workers"],
+                pin_memory=True,
+                persistent_workers=True,
+                drop_last=True,
+                collate_fn=collate,
+                shuffle=False,
         )
 
 
@@ -282,8 +440,11 @@ class RinLightningModule(LightningModule):
     
     def training_step(self, batch, batch_idx):
         opt = self.optimizers()
-        
-        batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw = batch
+        # Support optional second padded tensor appended by collate
+        if len(batch) == 8:
+            batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw, _batch_img2 = batch
+        else:
+            batch_img, batch_mask, image_mask, batch_class, pos_embs, nmh, nmw = batch
         # Log the padded/patchified batch input arriving to the trainer
         log_first_tensor("trainer.batch_img_in", batch_img[0])
         batch_class = torch.nn.functional.one_hot(batch_class, num_classes=self.num_classes).float()
