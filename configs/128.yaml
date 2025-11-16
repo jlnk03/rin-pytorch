@@ -39,7 +39,7 @@ diffusion:
 trainer:
   num_classes: 1000
   train_num_steps: 220000
-  train_batch_size: 128
+  train_batch_size: 192
   split_batches: true
   fp16: false
   lr_scheduler_name: "cosine"
