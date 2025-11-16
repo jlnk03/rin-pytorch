@@ -47,9 +47,15 @@ class TransformerDecoder(torch.nn.Module):
         self,
         x: torch.Tensor,
         enc: torch.Tensor,
-        enc_key_padding_mask: torch.Tensor | None = None,
+        query_document_ids: torch.Tensor | None,
+        key_document_ids: torch.Tensor | None,
     ) -> torch.Tensor:
         for dec_layer in self.dec_layers:
-            x = dec_layer(x=x, enc=enc, enc_key_padding_mask=enc_key_padding_mask)
+            x = dec_layer(
+                x=x,
+                enc=enc,
+                query_document_ids=query_document_ids,
+                key_document_ids=key_document_ids,
+            )
 
         return x

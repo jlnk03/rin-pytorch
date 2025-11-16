@@ -19,7 +19,10 @@ from pytorch_lightning.utilities.rank_zero import rank_zero_info, rank_zero_only
 import yaml
 
 from rin_pytorch.TrainerLightning import RinLightningModule
-from rin_pytorch.utils.data_utils import ResizeMaxSide, pad_to_max_size
+from rin_pytorch.utils.data_utils import (
+    ResizeMaxSide,
+    pack_batch_to_ragged,
+)
 
 DEFAULT_IMAGENET_ROOT = "/home/stud/ljul/storage/group/dataset_mirrors/imagenet2012/imagenet2012_download/train"
 DEFAULT_CIFAR_ROOT = "datasets/cifar10_flex"
@@ -43,6 +46,12 @@ try:
     from wandb.sdk.lib.sock_client import SockClientClosedError
 except Exception:  # pragma: no cover - fallback for wandb internals
     class SockClientClosedError(Exception):
+        pass
+
+try:
+    from wandb.sdk.lib.sock_client import BrokenPipeError
+except Exception:  # pragma: no cover - fallback for wandb internals
+    class BrokenPipeError(Exception):
         pass
 
 
@@ -221,7 +230,7 @@ def build_dataloader(config, data_root: str):
     else:
         dataset = torchvision.datasets.ImageFolder(root=data_root, transform=transform)
 
-    collate_fn = lambda batch: pad_to_max_size(
+    collate_fn = lambda batch: pack_batch_to_ragged(
         batch,
         patch_size=rin_cfg["patch_size"],
         tape_dim=rin_cfg["tape_dim"],

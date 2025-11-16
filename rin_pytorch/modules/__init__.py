@@ -1,5 +1,6 @@
 from .DropPath import DropPath
 from .FeedForwardLayer import FeedForwardLayer
+from .FlexMultiheadAttention import FlexMultiheadAttention
 from .LambdaModule import LambdaModule
 from .MLP import MLP
 from .ScalarEmbedding import ScalarEmbedding
@@ -12,6 +13,7 @@ __all__ = [
     "DropPath",
     "FeedForwardLayer",
     "LambdaModule",
+    "FlexMultiheadAttention",
     "MLP",
     "ScalarEmbedding",
     "TransformerDecoder",

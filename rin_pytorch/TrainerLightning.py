@@ -60,32 +60,49 @@ class RinLightningModule(LightningModule):
         self._should_profile_first_step = True
         self._grad_accum_counter = 0
 
-    def forward(self, batch_tokens, batch_class, batch_mask=None, pos_embs=None):
+    def forward(
+        self,
+        patches: torch.Tensor,
+        pos_embs: torch.Tensor,
+        batch_class: torch.Tensor,
+        offsets: torch.Tensor,
+        offsets_pos_embs: torch.Tensor,
+        document_ids: torch.Tensor,
+    ):
         return self.diffusion_model(
-            batch_tokens,
+            patches,
+            pos_embs,
             batch_class,
-            attn_mask=batch_mask,
-            tape_pos_emb=pos_embs,
+            offsets,
+            offsets_pos_embs,
+            document_ids,
         )
 
-    def _extract_batch(self, batch):
+    def _standardize_batch(self, batch):
         if isinstance(batch, dict):
-            batch_tokens = batch["patches"]
-            batch_class = batch["labels"]
-            batch_mask = batch.get("patch_mask")
-            pos_embs = batch.get("token_pos_embs")
-        else:
-            batch_tokens, batch_class = batch
-            batch_mask = None
-            pos_embs = None
-        return batch_tokens, batch_class, batch_mask, pos_embs
+            return batch
+        batch_tokens, batch_class = batch
+        return {
+            "patches": batch_tokens,
+            "labels": batch_class,
+            "patch_mask": None,
+            "token_pos_embs": None,
+        }
 
     def training_step(self, batch, batch_idx):
         opt = self.optimizers()
         scheduler = self.lr_schedulers()
 
-        batch_tokens, batch_class, batch_mask, pos_embs = self._extract_batch(batch)
-        batch_class = F.one_hot(batch_class, num_classes=self.num_classes).float()
+        batch_dict = self._standardize_batch(batch)
+        device = self.device
+        patches = batch_dict["patches"].to(device)
+        pos_embs = batch_dict["token_pos_embs"].to(device)
+        labels = batch_dict["labels"].to(device)
+        offsets = batch_dict["offsets"].to(device)
+        pos_offsets = batch_dict["pos_offsets"].to(device)
+        document_ids = batch_dict["document_ids"].to(device)
+
+        batch_class = F.one_hot(labels, num_classes=self.num_classes).float()
 
         # if self._grad_accum_counter == 0:
         opt.zero_grad(set_to_none=True)
@@ -106,7 +123,7 @@ class RinLightningModule(LightningModule):
             profiling_active = True
 
         with profiler_ctx as prof:
-            loss = self.forward(batch_tokens, batch_class, batch_mask, pos_embs)
+            loss = self.forward(patches, pos_embs, batch_class, offsets, pos_offsets, document_ids)
             self.manual_backward(loss)
 
         self._grad_accum_counter += 1
@@ -137,7 +154,7 @@ class RinLightningModule(LightningModule):
             prog_bar=True,
             logger=True,
             sync_dist=True,
-                batch_size=batch_tokens.size(0),
+            batch_size=batch_class.size(0),
         )
 
         # if should_step:
@@ -149,7 +166,7 @@ class RinLightningModule(LightningModule):
             prog_bar=False,
             logger=True,
             sync_dist=True,
-            batch_size=batch_tokens.size(0),
+            batch_size=batch_class.size(0),
         )
 
         if profiling_active and prof is not None:

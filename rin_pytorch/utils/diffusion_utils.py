@@ -56,7 +56,7 @@ class Scheduler:
             t = t.reshape(time_step_shape)
 
         gamma = self.time_transform(t)
-        noise = self.sample_noise(inputs.shape, device=device)
+        noise = torch.randn_like(inputs)
         inputs_noised = inputs * torch.sqrt(gamma) + noise * torch.sqrt(1 - gamma)
 
         return inputs_noised, noise, t.squeeze(), gamma

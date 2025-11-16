@@ -3,6 +3,10 @@ import torch.nn.functional as F
 from PIL import Image
 
 from .pos_embedding import create_2d_sin_cos_pos_emb
+from .ragged_tensor import (
+    get_document_ids,
+    ragged_list_to_tensor,
+)
 
 
 class ResizeMaxSide:
@@ -124,4 +128,68 @@ def pad_to_max_size(batch, patch_size: int, tape_dim: int, transform=None):
     }
 
     return batch_dict
+
+
+def pack_batch_to_ragged(batch, patch_size: int, tape_dim: int, transform=None):
+    """
+    Collate a batch of images into a single packed (ragged) representation.
+
+    Returns:
+        dict containing concatenated tokens/positional embeddings and their offsets.
+    """
+    if not batch:
+        raise ValueError("Empty batch encountered in pack_batch_to_ragged")
+
+    token_sequences = []
+    pos_sequences = []
+    labels = []
+
+    for example in batch:
+        if isinstance(example, dict):
+            image = example.get("image")
+            label = example.get("label", example.get("class", 0))
+        else:
+            image, label = example
+
+        if not isinstance(image, torch.Tensor):
+            if transform is None:
+                raise ValueError("pack_batch_to_ragged requires tensor images or a transform.")
+            image = transform(image)
+
+        if image.ndim != 3:
+            raise ValueError("Each image must be a CHW tensor.")
+
+        if image.size(0) > 3:
+            image = image[:3]
+        elif image.size(0) == 1:
+            image = image.repeat(3, 1, 1)
+
+        c, h, w = image.shape
+        pad_h = (patch_size - h % patch_size) % patch_size
+        pad_w = (patch_size - w % patch_size) % patch_size
+        if pad_h or pad_w:
+            image = F.pad(image, (0, pad_w, 0, pad_h))
+
+        nh = image.shape[1] // patch_size
+        nw = image.shape[2] // patch_size
+
+        tokens = patchify(image, patch_size)
+        pos = create_2d_sin_cos_pos_emb(nh, nw, tape_dim).view(-1, tape_dim)
+
+        token_sequences.append(tokens)
+        pos_sequences.append(pos)
+        labels.append(int(label))
+
+    packed_tokens, token_offsets = ragged_list_to_tensor(token_sequences)
+    packed_pos, pos_offsets = ragged_list_to_tensor(pos_sequences)
+    document_ids = get_document_ids(token_offsets)
+
+    return {
+        "patches": packed_tokens,
+        "offsets": token_offsets,
+        "token_pos_embs": packed_pos,
+        "pos_offsets": pos_offsets,
+        "labels": torch.tensor(labels, dtype=torch.long),
+        "document_ids": document_ids,
+    }
 

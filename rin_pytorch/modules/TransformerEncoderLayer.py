@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 
 from .DropPath import DropPath
+from .FlexMultiheadAttention import FlexMultiheadAttention, create_document_block_mask
 from .MLP import MLP
 
 
@@ -23,11 +24,11 @@ class TransformerEncoderLayer(torch.nn.Module):
         self.self_attention = self_attention
         if self_attention:
             self.mha_ln = nn.LayerNorm(dim, eps=1e-6, elementwise_affine=ln_scale_shift)
-            self.mha = nn.MultiheadAttention(
-                dim,
-                num_heads,
-                dropout=drop_att,
-                batch_first=True
+            self.mha = FlexMultiheadAttention(
+                in_features=dim,
+                num_heads=num_heads,
+                out_features=dim,
+                embed_dim=dim,
             )
 
         self.mlp = MLP(
@@ -42,10 +43,12 @@ class TransformerEncoderLayer(torch.nn.Module):
 
         self.dropp = DropPath(drop_path)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, inputs: tuple[torch.Tensor, torch.Tensor | None]) -> tuple[torch.Tensor, torch.Tensor | None]:
+        x, latent_document_ids = inputs
         if self.self_attention:
             x_ln = self.mha_ln(x)
-            x_residual, _ = self.mha(x_ln, x_ln, x_ln, need_weights=False)
+            block_mask = create_document_block_mask(latent_document_ids)
+            x_residual, _ = self.mha(x_ln, x_ln, x_ln, block_mask=block_mask, attn_mask=None)
             x = x + self.dropp(x_residual)
         x = self.mlp(x)
-        return x
+        return x, latent_document_ids
