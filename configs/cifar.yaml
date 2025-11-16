@@ -52,7 +52,7 @@ trainer:
     betas: [0.9, 0.999]
     eps: !!float 1e-8
   clip_grad_norm: 1.0
-  sample_every: 1
+  sample_every: 1000
   num_dl_workers: 2
   ema_decay: 0.9999
   ema_update_every: 1
