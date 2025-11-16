@@ -60,7 +60,7 @@ trainer:
     iterations: 100
     method: "ddim"
   checkpoint_folder: "/home/stud/ljul/storage/user/imagenet/"
-  run_name: "rin"
+  run_name: "rin_imagenet_flex"
   log_to_wandb: true
   log_every_n_steps: 10
   profile_flops: true

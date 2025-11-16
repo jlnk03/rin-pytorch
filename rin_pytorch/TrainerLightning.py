@@ -7,8 +7,6 @@ from torchvision.utils import make_grid
 
 from pytorch_lightning import LightningModule
 
-import wandb
-
 from rin_pytorch import Rin, RinDiffusionModel
 from .utils.optimization_utils import (
     build_parameters_mapping,
@@ -56,9 +54,11 @@ class RinLightningModule(LightningModule):
         self.ema_update_every = trainer_config["ema_update_every"]
         self.clip_grad_norm = trainer_config.get("clip_grad_norm")
         self.train_batch_size = trainer_config["train_batch_size"]
+        self.grad_accum_steps = max(1, trainer_config.get("gradient_accumulation_steps", 1))
         self.log_images = trainer_config.get("log_to_wandb", True)
 
         self._should_profile_first_step = True
+        self._grad_accum_counter = 0
 
     def forward(self, batch_img, batch_class, batch_mask=None, pos_embs=None):
         return self.diffusion_model(
@@ -87,7 +87,8 @@ class RinLightningModule(LightningModule):
         batch_img, batch_class, batch_mask, pos_embs = self._extract_batch(batch)
         batch_class = F.one_hot(batch_class, num_classes=self.num_classes).float()
 
-        opt.zero_grad(set_to_none=True)
+        if self._grad_accum_counter == 0:
+            opt.zero_grad(set_to_none=True)
 
         profiler_ctx = nullcontext()
         profiling_active = False
@@ -106,14 +107,29 @@ class RinLightningModule(LightningModule):
 
         with profiler_ctx as prof:
             loss = self.forward(batch_img, batch_class, batch_mask, pos_embs)
-            self.manual_backward(loss)
+            loss_to_backward = loss / self.grad_accum_steps
+            self.manual_backward(loss_to_backward)
 
-        if self.clip_grad_norm is not None:
-            torch.nn.utils.clip_grad_norm_(self.diffusion_model.parameters(), self.clip_grad_norm)
+        self._grad_accum_counter += 1
 
-        opt.step()
-        if scheduler is not None:
-            scheduler.step()
+        total_batches = getattr(self.trainer, "num_training_batches", None)
+        is_last_batch = (
+            isinstance(total_batches, int)
+            and total_batches > 0
+            and (batch_idx + 1) == total_batches
+        )
+        should_step = self._grad_accum_counter >= self.grad_accum_steps or is_last_batch
+
+        if should_step:
+            if self.clip_grad_norm is not None:
+                torch.nn.utils.clip_grad_norm_(self.diffusion_model.parameters(), self.clip_grad_norm)
+
+            opt.step()
+            if scheduler is not None:
+                scheduler.step()
+
+            opt.zero_grad(set_to_none=True)
+            self._grad_accum_counter = 0
 
         self.log(
             "loss",
@@ -125,16 +141,17 @@ class RinLightningModule(LightningModule):
             batch_size=batch_img.size(0),
         )
 
-        current_lr = scheduler.get_last_lr()[0] if scheduler is not None else opt.param_groups[0]["lr"]
-        self.log(
-            "lr",
-            current_lr,
-            on_step=True,
-            prog_bar=False,
-            logger=True,
-            sync_dist=True,
-            batch_size=batch_img.size(0),
-        )
+        if should_step:
+            current_lr = scheduler.get_last_lr()[0] if scheduler is not None else opt.param_groups[0]["lr"]
+            self.log(
+                "lr",
+                current_lr,
+                on_step=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+                batch_size=batch_img.size(0),
+            )
 
         if profiling_active and prof is not None:
             total_flops = sum(event.flops for event in prof.key_averages() if event.flops)
@@ -160,12 +177,13 @@ class RinLightningModule(LightningModule):
                 self.print("Profiler executed but no FLOPs information was collected.")
             self._should_profile_first_step = False
 
-        current_step = self.global_step + 1
-        if current_step % self.ema_update_every == 0:
-            self._update_ema()
+        if should_step:
+            current_step = self.global_step + 1
+            if current_step % self.ema_update_every == 0:
+                self._update_ema()
 
-        if self.log_images and current_step % self.sample_every == 0:
-            self._log_samples(current_step)
+            if self.log_images and current_step % self.sample_every == 0:
+                self._log_samples(current_step)
 
         return loss
 
@@ -213,8 +231,8 @@ class RinLightningModule(LightningModule):
                     ema_param.data.lerp_(param.data, 1 - self.ema_decay)
 
     def _log_samples(self, step):
-        logger = getattr(self.logger, "experiment", None)
-        if logger is None:
+        log_image = getattr(self.logger, "log_image", None)
+        if log_image is None:
             return
 
         self.ema_diffusion_model.eval()
@@ -238,7 +256,7 @@ class RinLightningModule(LightningModule):
 
             samples = _sample_with_overrides(num_samples=num_samples)
             grid = make_grid(samples, nrow=n, normalize=True, value_range=(0, 1), padding=0)
-            logger.log({"samples": [wandb.Image(grid)]}, step=step)
+            self._safe_log_image(log_image, "samples", [grid], step)
 
             horizontal_height = _snap_to_patch_multiple(int(self.image_height * 0.75), self.image_height)
             samples_horizontal = _sample_with_overrides(
@@ -250,7 +268,7 @@ class RinLightningModule(LightningModule):
             grid_horizontal = make_grid(
                 samples_horizontal, nrow=n, normalize=True, value_range=(0, 1), padding=0
             )
-            logger.log({"samples_horizontal": [wandb.Image(grid_horizontal)]}, step=step)
+            self._safe_log_image(log_image, "samples_horizontal", [grid_horizontal], step)
 
             vertical_width = _snap_to_patch_multiple(int(self.image_width * 0.75), self.image_width)
             samples_vertical = _sample_with_overrides(
@@ -262,9 +280,15 @@ class RinLightningModule(LightningModule):
             grid_vertical = make_grid(
                 samples_vertical, nrow=n, normalize=True, value_range=(0, 1), padding=0
             )
-            logger.log({"samples_vertical": [wandb.Image(grid_vertical)]}, step=step)
+            self._safe_log_image(log_image, "samples_vertical", [grid_vertical], step)
 
         del samples
         del samples_horizontal
         del samples_vertical
         self.ema_diffusion_model.train()
+
+    def _safe_log_image(self, log_image_fn, key, images, step):
+        try:
+            log_image_fn(key=key, images=images, step=step)
+        except Exception as exc:  # noqa: BLE001
+            self.print(f"[wandb] Failed to log {key}: {exc}")
