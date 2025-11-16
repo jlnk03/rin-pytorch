@@ -38,6 +38,12 @@ except Exception:  # pragma: no cover - fallback for wandb internals
     class SockClientClosedError(Exception):
         pass
 
+try:
+    from wandb.sdk.lib.sock_client import BrokenPipeError
+except Exception:  # pragma: no cover - fallback for wandb internals
+    class BrokenPipeError(Exception):
+        pass
+
 
 class ResilientWandbLogger(WandbLogger):
     """A WandB logger that keeps training alive when network/logging fails."""
