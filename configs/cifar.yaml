@@ -51,7 +51,7 @@ trainer:
     weight_decay: 0.01
     betas: [0.9, 0.999]
     eps: !!float 1e-8
-  clip_grad_norm: 1.0
+  clip_grad_norm: null
   sample_every: 1000
   num_dl_workers: 2
   ema_decay: 0.9999
@@ -60,7 +60,7 @@ trainer:
     iterations: 100
     method: "ddim"
   checkpoint_folder: "/dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/cifar/"
-  run_name: "cifar_flex_grad_clip"
+  run_name: "cifar_flex_ref"
   log_to_wandb: true 
   log_every_n_steps: 10
 
