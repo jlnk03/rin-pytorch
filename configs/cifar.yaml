@@ -38,7 +38,7 @@ diffusion:
 trainer:
   num_classes: 10
   train_num_steps: 150000
-  train_batch_size: 128
+  train_batch_size: 256
   split_batches: true
   fp16: false
   amp: false
