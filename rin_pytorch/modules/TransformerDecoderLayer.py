@@ -108,27 +108,27 @@ class TransformerDecoderLayer(torch.nn.Module):
             x_ln = self.cross_ln(x)
             enc = self.enc_ln(enc)
             # print(f'x_ln: {x_ln.shape}, enc: {enc.shape}')
-            # apply masks from var image sizes to cross attention only and not self attention
-            # x_res, _ = self.cross_mha(query=x_ln, key=enc, value=enc, need_weights=False, key_padding_mask=masks)
-            # Reshape mask to (batch_size, latent_len, image_len)
+            key_padding = None
             if masks is not None:
-                # print(f'masks: {masks.shape}')
-                # Get latent length from query tensor x_ln
-                if mode == "read":
-                    # Expand mask to include latent dimension
-                    latent_len = x_ln.shape[1]
-                    masks = masks.unsqueeze(1).expand(-1, latent_len, -1)
-                    # print(f'masks inserted: {masks.shape}')
-                    # print(f'masks sum latents: {masks.sum(dim=1)}')
-                else:
-                    latent_len = enc.shape[1]
-                    masks = masks.unsqueeze(2).expand(-1, -1, latent_len)
-                masks = masks.repeat_interleave(self.num_heads, dim=0)
-                # print(f'masks repeated: {masks.shape}')
-                # Invert mask since PyTorch attention masks use True to indicate positions to mask
-                masks = ~masks.bool()
+                key_padding = masks
+                if key_padding.dim() == 3:
+                    if key_padding.shape[-1] == 1:
+                        key_padding = key_padding.squeeze(-1)
+                    elif key_padding.shape[1] == 1:
+                        key_padding = key_padding.squeeze(1)
+                    else:
+                        key_padding = key_padding.any(dim=1)
+                if key_padding.dim() != 2:
+                    raise ValueError("Cross-attention masks must be broadcastable to (B, L_enc)")
+                key_padding = key_padding.to(torch.bool)
 
-            x_res, _ = self.cross_mha(query=x_ln, key=enc, value=enc, need_weights=False, attn_mask=masks)
+            x_res, _ = self.cross_mha(
+                query=x_ln,
+                key=enc,
+                value=enc,
+                need_weights=False,
+                key_padding_mask=key_padding,
+            )
             x = x + self.dropp(x_res)
             
         if self.use_mlp:

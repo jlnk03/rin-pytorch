@@ -67,6 +67,8 @@ class SparseMultiheadAttention(nn.Module):
         self._last_pooled_attention: Optional[torch.Tensor] = None
         self._last_critical_mask: Optional[torch.Tensor] = None
         self._last_linear_output: Optional[torch.Tensor] = None
+        self._last_pooled_key_padding_mask: Optional[torch.Tensor] = None
+        self._last_pooled_query_padding_mask: Optional[torch.Tensor] = None
 
     @property
     def batch_first(self) -> bool:
@@ -95,7 +97,13 @@ class SparseMultiheadAttention(nn.Module):
         pooled = sums / counts.clamp_min(1.0)
         return pooled
 
-    def compute_pooled_scores(self, query: torch.Tensor, key: torch.Tensor) -> torch.Tensor:
+    def compute_pooled_scores(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        key_padding_mask: Optional[torch.Tensor] = None,
+        query_padding_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """
         Compute Pc by:
         1) mean-pooling query and key (and value=key) along the token dimension
@@ -107,25 +115,73 @@ class SparseMultiheadAttention(nn.Module):
             key = key.transpose(0, 1)
         bsz, tgt_len, e_q = query.shape
         _, src_len, e_k = key.shape 
-        def pool_1d(x: torch.Tensor) -> torch.Tensor:
+        self._last_pooled_key_padding_mask = None
+        self._last_pooled_query_padding_mask = None
+
+        def pool_1d(
+            x: torch.Tensor,
+            mask: Optional[torch.Tensor] = None,
+        ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
             block = self.block_size
             num_blocks = (x.shape[1] + block - 1) // block
             pad_len = num_blocks * block - x.shape[1]
             if pad_len > 0:
                 x = torch.cat([x, x.new_zeros(x.shape[0], pad_len, x.shape[2])], dim=1)
+                if mask is not None:
+                    pad_mask = mask.new_ones(mask.shape[0], pad_len)
+                    mask = torch.cat([mask, pad_mask], dim=1)
             x = x.view(x.shape[0], num_blocks, block, x.shape[2])
-            sums = x.sum(dim=2)
-            counts = x.new_ones(bsz, num_blocks, block, 1).sum(dim=2)
-            return sums / counts.clamp_min(1.0)
+            if mask is None:
+                pooled = x.mean(dim=2)
+                return pooled, None
+            mask = mask.to(torch.bool)
+            mask = mask.view(mask.shape[0], num_blocks, block, 1)
+            valid = (~mask).to(x.dtype)
+            sums = (x * valid).sum(dim=2)
+            counts = valid.sum(dim=2)
+            pooled = sums / counts.clamp_min(1.0)
+            block_mask = counts.squeeze(-1) == 0
+            return pooled, block_mask
 
-        q_pool_seq = pool_1d(query)
-        k_pool_seq = pool_1d(key)
+        key_mask_2d: Optional[torch.Tensor] = None
+        if key_padding_mask is not None:
+            key_mask_2d = key_padding_mask
+            if key_mask_2d.dim() == 3:
+                if key_mask_2d.shape[-1] == 1:
+                    key_mask_2d = key_mask_2d.squeeze(-1)
+                elif key_mask_2d.shape[1] == 1:
+                    key_mask_2d = key_mask_2d.squeeze(1)
+            if key_mask_2d.dim() != 2:
+                raise ValueError("key_padding_mask must be broadcastable to (B, Lk)")
+            key_mask_2d = key_mask_2d.to(torch.bool)
+
+        query_mask_2d: Optional[torch.Tensor] = None
+        if query_padding_mask is not None:
+            query_mask_2d = query_padding_mask
+            if query_mask_2d.dim() == 3:
+                if query_mask_2d.shape[-1] == 1:
+                    query_mask_2d = query_mask_2d.squeeze(-1)
+                elif query_mask_2d.shape[1] == 1:
+                    query_mask_2d = query_mask_2d.squeeze(1)
+            if query_mask_2d.dim() != 2:
+                raise ValueError("query_padding_mask must be broadcastable to (B, Lq)")
+            query_mask_2d = query_mask_2d.to(torch.bool)
+
+        q_pool_seq, q_pool_mask = pool_1d(query, query_mask_2d)
+        k_pool_seq, k_pool_mask = pool_1d(key, key_mask_2d)
         v_pool_seq = k_pool_seq
 
         if not self.batch_first:
             q_pool_seq = q_pool_seq.transpose(0, 1)
             k_pool_seq = k_pool_seq.transpose(0, 1)
             v_pool_seq = v_pool_seq.transpose(0, 1)
+
+        pooled_key_padding_mask = k_pool_mask
+        if pooled_key_padding_mask is not None:
+            pooled_key_padding_mask = pooled_key_padding_mask.to(torch.bool)
+
+        self._last_pooled_key_padding_mask = pooled_key_padding_mask
+        self._last_pooled_query_padding_mask = q_pool_mask.to(torch.bool) if q_pool_mask is not None else None
 
         was_training = self.mha.training
         try:
@@ -135,6 +191,7 @@ class SparseMultiheadAttention(nn.Module):
                     q_pool_seq,
                     k_pool_seq,
                     v_pool_seq,
+                    key_padding_mask=pooled_key_padding_mask,
                     need_weights=True,
                     average_attn_weights=False,
                 )
@@ -169,6 +226,19 @@ class SparseMultiheadAttention(nn.Module):
             pc_agg = pc.max(dim=1).values  # (B,Lq,Lk)
 
         batch_size, num_query_blocks, num_key_blocks = pc_agg.shape
+        key_block_mask = self._last_pooled_key_padding_mask
+        query_block_mask = self._last_pooled_query_padding_mask
+        if pc_agg.dtype.is_floating_point:
+            neg_inf = torch.finfo(pc_agg.dtype).min
+        else:
+            neg_inf = -1e9
+        if key_block_mask is not None:
+            expanded = key_block_mask[:, None, :].expand(batch_size, num_query_blocks, num_key_blocks)
+            pc_agg = pc_agg.masked_fill(expanded, neg_inf)
+        if query_block_mask is not None:
+            expanded = query_block_mask[:, :, None].expand(batch_size, num_query_blocks, num_key_blocks)
+            pc_agg = pc_agg.masked_fill(expanded, neg_inf)
+
         if self.critical_k is not None:
             k_per_row = max(1, min(num_key_blocks, int(self.critical_k)))
         else:
@@ -177,6 +247,12 @@ class SparseMultiheadAttention(nn.Module):
         topk_indices = pc_agg.topk(k_per_row, dim=-1).indices  # (B,Lq,k)
         critical_mask = torch.zeros_like(pc_agg, dtype=torch.bool)
         critical_mask.scatter_(-1, topk_indices, True)
+        if key_block_mask is not None:
+            expanded = key_block_mask[:, None, :].expand(batch_size, num_query_blocks, num_key_blocks)
+            critical_mask = critical_mask & (~expanded)
+        if query_block_mask is not None:
+            expanded = query_block_mask[:, :, None].expand(batch_size, num_query_blocks, num_key_blocks)
+            critical_mask = critical_mask & (~expanded)
         self._last_critical_mask = critical_mask
         return critical_mask
 
@@ -392,29 +468,35 @@ class SparseMultiheadAttention(nn.Module):
         value: torch.Tensor,
         key_padding_mask: Optional[torch.Tensor] = None,
         need_weights: bool = False,
-        attn_mask: Optional[torch.Tensor] = None,
         average_attn_weights: bool = True,
         is_causal: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
 
+        if self.batch_first:
+            bsz, tgt_len, _ = query.shape
+            _, src_len, _ = key.shape
+        else:
+            tgt_len, bsz, _ = query.shape
+            src_len, _, _ = key.shape
+
         # 1) Compute pooled attention and classify critical blocks per query block
         critical_blocks = None
         try:
-            self.compute_pooled_scores(query, key)
+            self.compute_pooled_scores(
+                query,
+                key,
+                key_padding_mask=key_padding_mask,
+            )
             critical_blocks = self.classify_pooled_blocks(self._last_pooled_attention)
         except Exception:
             self._last_pooled_attention = None
+            self._last_pooled_key_padding_mask = None
+            self._last_pooled_query_padding_mask = None
             critical_blocks = None
 
         # 2) Expand block-level critical mask to token-level mask (B, Lq, Lk)
         block_mask_tokens: Optional[torch.Tensor] = None
         if critical_blocks is not None:
-            if self.batch_first:
-                bsz, tgt_len, _ = query.shape
-                _, src_len, _ = key.shape
-            else:
-                tgt_len, bsz, _ = query.shape
-                src_len, _, _ = key.shape
             block = self.block_size
             num_q_blocks = (tgt_len + block - 1) // block
             num_k_blocks = (src_len + block - 1) // block
@@ -426,22 +508,29 @@ class SparseMultiheadAttention(nn.Module):
                 allowed = cb[q_block_idx][:, k_block_idx]
                 block_mask_tokens[b] = ~allowed  # True means mask (disallow)
 
-        # 3) Combine incoming attn_mask with block mask and expand across heads for MHA
-        final_attn_mask = attn_mask
-        if block_mask_tokens is not None:
-            repeat_mask = block_mask_tokens.repeat_interleave(self.num_heads, dim=0)
-            if final_attn_mask is None:
-                final_attn_mask = repeat_mask
-            else:
-                # Normalize existing to bool mask shape (B*H, Lq, Lk)
-                if final_attn_mask.dtype != torch.bool:
-                    final_attn_mask = final_attn_mask != 0
-                if final_attn_mask.dim() == 2:
-                    final_attn_mask = final_attn_mask.unsqueeze(0).expand(repeat_mask.shape[0], -1, -1)
-                elif final_attn_mask.dim() == 3:
-                    if final_attn_mask.shape[0] == block_mask_tokens.shape[0]:
-                        final_attn_mask = final_attn_mask.repeat_interleave(self.num_heads, dim=0)
-                final_attn_mask = final_attn_mask | repeat_mask
+        # 3) Build attention mask from block mask and key padding mask, expand across heads
+        combined_mask: Optional[torch.Tensor] = block_mask_tokens
+
+        if key_padding_mask is not None:
+            key_mask = key_padding_mask
+            if key_mask.dim() == 3:
+                if key_mask.shape[-1] == 1:
+                    key_mask = key_mask.squeeze(-1)
+                elif key_mask.shape[1] == 1:
+                    key_mask = key_mask.squeeze(1)
+            if key_mask.dim() != 2:
+                raise ValueError("key_padding_mask must be broadcastable to (B, Lk)")
+            key_mask = key_mask.to(torch.bool)
+            if key_mask.shape[0] != bsz or key_mask.shape[1] != src_len:
+                raise ValueError("key_padding_mask shape must match key (B, Lk)")
+            key_mask_expanded = key_mask[:, None, :].expand(-1, tgt_len, -1)
+            combined_mask = key_mask_expanded if combined_mask is None else (combined_mask | key_mask_expanded)
+
+        final_attn_mask: Optional[torch.Tensor] = None
+        if combined_mask is not None:
+            if combined_mask.dtype != torch.bool:
+                combined_mask = combined_mask != 0
+            final_attn_mask = combined_mask.repeat_interleave(self.num_heads, dim=0)
 
         # 4) Sparse exact output via MHA with block mask
         o_s, attn = self.mha(
