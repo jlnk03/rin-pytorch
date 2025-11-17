@@ -3,9 +3,8 @@
 #SBATCH --output=/home/stud/ljul/Documents/slurm/logs/slurm-%j.out
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=4
-#SBATCH --gres=gpu:a40:1
+#SBATCH --gres=gpu:nvidia_h100_nvl:1
 #SBATCH --mem=48G
-#SBATCH --nodelist=node[3,8,9,10,11,12,13,14,15,16,17,18]
 #SBATCH --time=4-00:00:00
 
 echo "Starting the job"
