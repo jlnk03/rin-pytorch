@@ -3,7 +3,7 @@
 #SBATCH --output=/home/stud/ljul/Documents/slurm/logs/slurm-%j.out
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=4
-#SBATCH --gres=gpu:nvidia_h100_nvl:1
+#SBATCH --gres=gpu:a40:1
 #SBATCH --mem=48G
 #SBATCH --time=4-00:00:00
 

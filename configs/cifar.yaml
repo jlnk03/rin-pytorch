@@ -34,6 +34,8 @@ diffusion:
   self_cond: "latent"
   loss_type: "eps"
   num_classes: 10
+  cond_dropout: 0.1
+  guidance: 3.0
 
 trainer:
   num_classes: 10
@@ -60,7 +62,7 @@ trainer:
     iterations: 100
     method: "ddim"
   checkpoint_folder: "/home/stud/ljul/storage/user/cifar/"
-  run_name: "rin_cifar_flex"
+  run_name: "rin_cifar_flex_cfg"
   log_to_wandb: true 
   log_every_n_steps: 10
 

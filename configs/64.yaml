@@ -1,14 +1,14 @@
 rin:
-  num_layers: "4,4,4,4,4,4"
+  num_layers: "4,4,4,4"
   latent_slots: 128
   latent_dim: 768
   latent_mlp_ratio: 4
   latent_num_heads: 16
-  tape_dim: 512
+  tape_dim: 256
   tape_mlp_ratio: 4
   rw_num_heads: 16
-  image_height: 128
-  image_width: 128
+  image_height: 64
+  image_width: 64
   image_channels: 3
   patch_size: 4
   latent_pos_encoding: "learned"
@@ -40,8 +40,8 @@ diffusion:
 
 trainer:
   num_classes: 1000
-  train_num_steps: 220000
-  train_batch_size: 128
+  train_num_steps: 150000
+  train_batch_size: 512
   split_batches: true
   fp16: false
   lr_scheduler_name: "cosine"
@@ -62,7 +62,7 @@ trainer:
     iterations: 100
     method: "ddim"
   checkpoint_folder: "/home/stud/ljul/storage/user/imagenet/"
-  run_name: "rin_imagenet_flex"
+  run_name: "rin_imagenet_flex_64"
   log_to_wandb: true
   log_every_n_steps: 10
   profile_flops: true

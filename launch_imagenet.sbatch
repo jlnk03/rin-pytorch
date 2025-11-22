@@ -9,5 +9,6 @@
 
 echo "Starting the job"
 echo "Job ID: $SLURM_JOB_ID"
-srun python train_lightning.py --resume_checkpoint /home/stud/ljul/storage/user/imagenet/rin_imagenet_flex_20251116_152918/last.ckpt
+# srun python train_lightning.py --resume_checkpoint /home/stud/ljul/storage/user/imagenet/rin_imagenet_flex_20251116_152918/last.ckpt
+srun python train_lightning.py --config configs/64.yaml
 echo "Job finished"
