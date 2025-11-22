@@ -23,6 +23,7 @@ from .utils.optimization_utils import (
 from .utils.pos_embedding import create_2d_sin_cos_pos_emb
 
 import wandb
+from pathlib import Path
 
 import os
 from dotenv import load_dotenv
@@ -58,21 +59,74 @@ class ImageNetWebDataset(Dataset):
 
         return image, label
 
+
+class FlexibleCIFAR10Dataset(Dataset):
+    def __init__(self, root_dir, split="train", transform=None):
+        super().__init__()
+        self.root_dir = Path(root_dir)
+        self.split = split
+        self.transform = transform
+
+        split_dir = self.root_dir / split
+        if not split_dir.exists():
+            raise FileNotFoundError(f"CIFAR-Flex split directory not found: {split_dir}")
+
+        self.samples = []
+        for class_dir in sorted(split_dir.iterdir()):
+            if not class_dir.is_dir():
+                continue
+            try:
+                label = int(class_dir.name)
+            except ValueError:
+                continue
+            for img_path in sorted(class_dir.glob("*.png")):
+                self.samples.append((img_path, label))
+
+        if not self.samples:
+            raise RuntimeError(f"No samples found in CIFAR-Flex dataset at {split_dir}")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        img_path, label = self.samples[idx]
+        image = Image.open(img_path).convert("RGB")
+        if self.transform:
+            image = self.transform(image)
+
+        label = torch.tensor(label, dtype=torch.long)
+        return image, label
+
 class ImageNetDataModule(LightningDataModule):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        self.dataset_name = self.config["trainer"].get("dataset_name", "imagenet").lower()
+        self.cifar_flex_path = self.config["trainer"].get("cifar_flex_path", "datasets/cifar10_flex")
+
+        target_size = (
+            self.config["rin"].get("image_height", 256),
+            self.config["rin"].get("image_width", 256),
+        )
+
         self.transform = transforms.Compose([
-            transforms.Resize((256, 256)),
+            transforms.Resize(target_size),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
         ])
     
     def setup(self, stage=None):
-        self.train_dataset = ImageNetWebDataset(
-            split='train',
-            transform=self.transform
-        )
+        if self.dataset_name == "cifar_flex":
+            self.train_dataset = FlexibleCIFAR10Dataset(
+                root_dir=self.cifar_flex_path,
+                split="train",
+                transform=self.transform,
+            )
+        else:
+            self.train_dataset = ImageNetWebDataset(
+                split='train',
+                transform=self.transform
+            )
     
     def train_dataloader(self):
         return DataLoader(
