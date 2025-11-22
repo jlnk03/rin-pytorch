@@ -39,6 +39,10 @@ trainer.train()
 Refer to `train_cifar10.py` file for an example of how to train a model on CIFAR-10.
 From that, it should be clear how to adapt the code to other datasets and configs.
 
+## Classifier-Free Guidance
+
+Set `diffusion.cond_dropout` to the probability of zeroing labels during training and `diffusion.guidance` to the inference guidance scale (use `0.0` to disable). These are the only additions on top of the original Pix2Seq translation and enable CFG experiments without changing the rest of the pipeline.
+
 ## Examples
 
 The following samples are generated using the same hyperparameters as the original authors for the CIFAR-10 dataset.
