@@ -31,7 +31,7 @@ class SparseMultiheadAttention(nn.Module):
         dropout: float = 0.0,
         batch_first: bool = False,
         block_size: int = 4,
-        critical_ratio: float = 0.20,
+        critical_ratio: float = 0.25,
         critical_k: Optional[int] = None,
         head_aggregation: str = "mean",
         device: Optional[torch.device] = None,

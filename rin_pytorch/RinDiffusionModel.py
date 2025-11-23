@@ -17,6 +17,8 @@ class RinDiffusionModel(torch.nn.Module):
         conditional: str = "class",
         self_cond_rate: float = 0.9,
         loss_type: str = "x",
+        cond_dropout: float = 0.0,
+        guidance: float = 0.0,
     ):
         super().__init__()
         self._inference_schedule = inference_schedule
@@ -26,6 +28,8 @@ class RinDiffusionModel(torch.nn.Module):
         self._conditional = conditional
         self._self_cond_rate = self_cond_rate
         self._loss_type = loss_type
+        self._cond_dropout = cond_dropout
+        self._guidance = guidance
 
         self.scheduler = diffusion_utils.Scheduler(train_schedule)
 
@@ -72,6 +76,8 @@ class RinDiffusionModel(torch.nn.Module):
 
         latent_prev = None
         tape_prev = None
+        guidance_scale = max(self._guidance, 0.0) if cond is not None else 0.0
+        cond_null = self._apply_cond_dropout(cond, force_drop=True) if (cond is not None and guidance_scale > 0.0) else None
         for t in tqdm(
             torch.arange(iterations, dtype=torch.float32, device=device), desc="sampling", leave=False, position=1
         ):
@@ -79,9 +85,14 @@ class RinDiffusionModel(torch.nn.Module):
             time_step_p = torch.max(get_step(t + 1), torch.tensor(0.0))
             gamma, gamma_prev = time_transform(time_step), time_transform(time_step_p)
 
-            pred_out, latent_prev, tape_prev = self.denoise(samples, gamma, cond, latent_prev, tape_prev)
+            pred_cond, latent_out, tape_out = self.denoise(samples, gamma, cond, latent_prev, tape_prev)
+            final_pred = pred_cond
+            if guidance_scale > 0.0 and cond_null is not None:
+                pred_uncond, _, _ = self.denoise(samples, gamma, cond_null, latent_prev, tape_prev)
+                final_pred = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
+            latent_prev, tape_prev = latent_out, tape_out
             x0_eps = diffusion_utils.get_x0_eps(
-                samples, gamma, pred_out, self._pred_type, truncate_noise=True, clip_x0=True
+                samples, gamma, final_pred, self._pred_type, truncate_noise=True, clip_x0=True
             )
             noise_pred, data_pred = x0_eps["noise_pred"], x0_eps["data_pred"]
             samples = self.scheduler.transition_step(
@@ -110,15 +121,16 @@ class RinDiffusionModel(torch.nn.Module):
         bsz = images.size(0)
         latent_prev = torch.zeros((bsz, *self.denoiser.latent_shape), device=images.device)
         tape_prev = torch.zeros((bsz, *self.denoiser.tape_shape), device=images.device)
+        labels = self._apply_cond_dropout(labels)
         if self._self_cond != "none" and self._self_cond_rate > 0.0:
-            mask = torch.rand(bsz) < self._self_cond_rate
+            mask = torch.rand(bsz, device=images.device) < self._self_cond_rate
 
             if torch.any(mask):
                 with torch.no_grad():
                     _, latent_prev_out, tape_prev_out = self.denoise(
                         x=images_noised[mask],
                         gamma=gamma[mask],
-                        cond=labels[mask],
+                        cond=labels[mask] if labels is not None else None,
                     )
 
                 latent_prev[mask] = latent_prev_out.detach()
@@ -154,3 +166,13 @@ class RinDiffusionModel(torch.nn.Module):
         images, noise, _, pred_dict = self.noise_denoise(images, labels, t=t)
         loss = self.compute_loss(images, noise, pred_dict)
         return loss
+
+    def _apply_cond_dropout(self, labels: torch.Tensor | None, force_drop: bool = False):
+        if labels is None:
+            return None
+        if force_drop:
+            return torch.zeros_like(labels)
+        if self._cond_dropout <= 0.0:
+            return labels
+        drop_mask = (torch.rand(labels.size(0), device=labels.device) > self._cond_dropout).float().unsqueeze(-1)
+        return labels * drop_mask

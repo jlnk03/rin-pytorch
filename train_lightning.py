@@ -115,6 +115,14 @@ class ResilientWandbLogger(WandbLogger):
         super_log_metrics = super().log_metrics
         self._run_with_resilience(super_log_metrics, metrics, step)
 
+    def _log_media_impl(self, payload: Mapping[str, Any], step: Optional[int]) -> None:
+        experiment = self.experiment
+        experiment.log(payload, step=step)
+
+    @rank_zero_only
+    def log_media(self, payload: Mapping[str, Any], step: Optional[int] = None) -> None:
+        self._run_with_resilience(self._log_media_impl, payload, step)
+
 
 def load_config(config_file):
     with open(config_file, "r") as f:
