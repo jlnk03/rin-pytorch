@@ -226,17 +226,26 @@ class RinLightningModule(LightningModule):
                     ema_param.data.lerp_(param.data, 1 - self.ema_decay)
 
     def _log_samples(self, step):
-        logger = getattr(self.logger, "experiment", None)
-        if logger is None:
-            return
-
         self.ema_diffusion_model.eval()
         n = 8
         with torch.no_grad():
             samples = self.ema_diffusion_model.sample(num_samples=n * n, **self.sampling_kwargs)
 
         grid = make_grid(samples, nrow=n, normalize=True, value_range=(0, 1), padding=0)
-        logger.log({"samples": [wandb.Image(grid)]}, step=step)
+
+        payload = {"samples": [wandb.Image(grid)]}
+        lightning_logger = getattr(self, "logger", None)
+        if lightning_logger is None:
+            return
+
+        log_media = getattr(lightning_logger, "log_media", None)
+        if callable(log_media):
+            log_media(payload, step=step)
+        else:
+            experiment = getattr(lightning_logger, "experiment", None)
+            if experiment is None:
+                return
+            experiment.log(payload, step=step)
 
         del samples
         self.ema_diffusion_model.train()
