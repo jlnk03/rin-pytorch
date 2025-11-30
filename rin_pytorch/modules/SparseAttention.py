@@ -7,10 +7,10 @@ import torch.nn as nn
 
 class SparseMultiheadAttention(nn.Module):
     """
-    Sparse attention that:
-    1. Pools tokens into blocks and classifies importance via pooled attention
-    2. Drops non-critical tokens, runs full attention only on critical tokens
-    3. Merges results back: critical tokens get attention output, others get zeros
+    Sparse cross-attention that always pools the LARGER sequence:
+    - If key > query: pool keys, all queries attend to selected keys
+    - If query > key: pool queries, selected queries attend to all keys, scatter back
+    - If both small: full attention (no sparsity)
     """
     def __init__(
         self,
@@ -24,6 +24,7 @@ class SparseMultiheadAttention(nn.Module):
         critical_ratio: float = 0.25,
         critical_k: Optional[int] = None,
         head_aggregation: str = "mean",
+        min_sparse_seq: int = 256,  # Skip sparsity if larger sequence <= this
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
     ) -> None:
@@ -37,6 +38,7 @@ class SparseMultiheadAttention(nn.Module):
         self.critical_ratio = critical_ratio
         self.critical_k = critical_k
         self.head_aggregation = head_aggregation
+        self.min_sparse_seq = min_sparse_seq
         self._batch_first = batch_first
         
         if self.critical_ratio is not None:
@@ -49,7 +51,7 @@ class SparseMultiheadAttention(nn.Module):
             kdim=kdim,
             vdim=vdim,
             dropout=dropout,
-            batch_first=True,  # Always use batch_first internally
+            batch_first=True,
             device=device,
             dtype=dtype,
         )
@@ -71,60 +73,70 @@ class SparseMultiheadAttention(nn.Module):
         x = x.view(bsz, num_blocks, block, embed)
         return x.mean(dim=2)
 
-    def _classify_important_tokens(
-        self, 
-        query: torch.Tensor, 
-        key: torch.Tensor,
-        key_padding_mask: Optional[torch.Tensor] = None,
+    def _select_important_blocks(
+        self,
+        to_pool: torch.Tensor,
+        other: torch.Tensor,
+        pool_is_key: bool,
     ) -> torch.Tensor:
         """
-        Classify which tokens are important using pooled attention.
-        Returns: token_important (B, L) - True for important tokens
+        Select important blocks from the larger sequence.
+        Returns: important mask (B, pool_len) - True for important tokens
         """
-        bsz, seq_len, _ = query.shape
+        bsz, pool_len, _ = to_pool.shape
+        _, other_len, _ = other.shape
         block = self.block_size
-        num_blocks = (seq_len + block - 1) // block
+        num_blocks = (pool_len + block - 1) // block
 
-        # Pool and compute attention scores
-        q_pool = self._pool_1d(query)
-        k_pool = self._pool_1d(key)
+        # Pool the larger sequence
+        pooled = self._pool_1d(to_pool)
 
-        # Compute attention weights on pooled tokens
+        # print(f"[SPARSE] Pooled {'key' if pool_is_key else 'query'}: {to_pool.shape} -> {pooled.shape}")
+
+        # Compute attention scores to determine importance
         with torch.no_grad():
-            _, attn_w = self.mha(
-                q_pool, k_pool, k_pool,
-                need_weights=True,
-                average_attn_weights=False,
-            )  # (B, H, num_blocks, num_blocks)
+            if pool_is_key:
+                # other=query, pooled=key -> which key blocks are important
+                _, attn_w = self.mha(other, pooled, pooled, need_weights=True, average_attn_weights=False)
+                # attn_w: (B, H, other_len, num_blocks)
+            else:
+                # pooled=query, other=key -> which query blocks are important
+                _, attn_w = self.mha(pooled, other, other, need_weights=True, average_attn_weights=False)
+                # attn_w: (B, H, num_blocks, other_len)
 
         # Aggregate across heads
         if self.head_aggregation == "mean":
-            scores = attn_w.mean(dim=1)  # (B, num_blocks, num_blocks)
+            scores = attn_w.mean(dim=1)
         else:
             scores = attn_w.max(dim=1).values
 
-        # Aggregate across query blocks: importance = how much attention each key block receives
-        block_importance = scores.sum(dim=1)  # (B, num_blocks)
+        # Get block importance
+        if pool_is_key:
+            # Sum across query positions -> importance of each key block
+            block_importance = scores.sum(dim=1)  # (B, num_blocks)
+        else:
+            # Sum across key positions -> importance of each query block
+            block_importance = scores.sum(dim=2)  # (B, num_blocks)
 
-        # Select top-k important blocks
+        # Select top-k blocks
         if self.critical_k is not None:
             k = max(1, min(num_blocks, int(self.critical_k)))
         else:
             k = max(1, int(math.ceil(self.critical_ratio * num_blocks)))
 
-        topk_indices = block_importance.topk(k, dim=-1).indices  # (B, k)
-        block_important = torch.zeros(bsz, num_blocks, dtype=torch.bool, device=query.device)
+        # print(f"[SPARSE] Selecting top k={k} blocks out of {num_blocks} (ratio={self.critical_ratio})")
+
+        topk_indices = block_importance.topk(k, dim=-1).indices
+        block_important = torch.zeros(bsz, num_blocks, dtype=torch.bool, device=to_pool.device)
         block_important.scatter_(1, topk_indices, True)
 
         # Expand to token level
         block_idx = torch.div(
-            torch.arange(seq_len, device=query.device), block, rounding_mode="floor"
+            torch.arange(pool_len, device=to_pool.device), block, rounding_mode="floor"
         ).clamp_max(num_blocks - 1)
-        token_important = block_important[:, block_idx]  # (B, seq_len)
+        token_important = block_important[:, block_idx]
 
-        # Also exclude padded tokens if key_padding_mask provided
-        if key_padding_mask is not None:
-            token_important = token_important & ~key_padding_mask
+        # print(f"[SPARSE] Selected {token_important.sum(dim=1).tolist()} tokens per batch")
 
         self._last_critical_mask = block_important
         return token_important
@@ -141,66 +153,112 @@ class SparseMultiheadAttention(nn.Module):
         is_causal: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
-        Sparse attention: drops non-critical tokens, runs attention, merges back.
+        Sparse cross-attention: always pools the larger sequence.
         """
-        # Convert to batch_first internally
         if not self._batch_first:
             query = query.transpose(0, 1)
             key = key.transpose(0, 1)
             value = value.transpose(0, 1)
 
-        bsz, seq_len, embed = query.shape
+        bsz, q_len, q_embed = query.shape
+        _, k_len, k_embed = key.shape
 
-        # 1) Classify which tokens are important
-        token_important = self._classify_important_tokens(query, key, key_padding_mask)
+        larger_len = max(q_len, k_len)
 
-        # 2) Find max number of important tokens across batch for padding
-        num_important = token_important.sum(dim=1)  # (B,)
-        max_important = int(num_important.max().item())
-
-        if max_important == 0:
-            # Edge case: no important tokens, return zeros
-            out = query.new_zeros(bsz, seq_len, embed)
+        # If both sequences are small, use full attention
+        if larger_len <= self.min_sparse_seq:
+            # print(f"[SPARSE] FULL ATTN - max({q_len}, {k_len})={larger_len} <= {self.min_sparse_seq}")
+            out, attn = self.mha(query, key, value, key_padding_mask=key_padding_mask,
+                                  need_weights=need_weights, average_attn_weights=average_attn_weights)
             if not self._batch_first:
                 out = out.transpose(0, 1)
-            return out, None
+            return out, attn if need_weights else (out, None)
 
-        # 3) Gather important tokens into dense tensors, padded to max_important
-        q_gathered = query.new_zeros(bsz, max_important, embed)
-        k_gathered = key.new_zeros(bsz, max_important, embed)
-        v_gathered = value.new_zeros(bsz, max_important, embed)
-        gathered_padding = torch.ones(bsz, max_important, dtype=torch.bool, device=query.device)
-        
-        # Store indices for scattering back
-        scatter_indices = []
+        # print("=" * 60)
+        # print(f"[SPARSE] query: {query.shape}, key: {key.shape}")
 
-        for b in range(bsz):
-            idx = token_important[b].nonzero(as_tuple=True)[0]
-            n = idx.shape[0]
-            q_gathered[b, :n] = query[b, idx]
-            k_gathered[b, :n] = key[b, idx]
-            v_gathered[b, :n] = value[b, idx]
-            gathered_padding[b, :n] = False
-            scatter_indices.append(idx)
+        if k_len >= q_len:
+            # KEY is larger -> pool keys, all queries attend to selected keys
+            # print(f"[SPARSE] KEY is larger ({k_len} >= {q_len}) -> pooling keys")
+            
+            key_important = self._select_important_blocks(key, query, pool_is_key=True)
+            max_important = int(key_important.sum(dim=1).max().item())
 
-        # 4) Run full attention on gathered tokens
-        out_gathered, attn = self.mha(
-            query=q_gathered,
-            key=k_gathered,
-            value=v_gathered,
-            key_padding_mask=gathered_padding,
-            need_weights=need_weights,
-            average_attn_weights=average_attn_weights,
-        )
+            if max_important == 0:
+                out = query.new_zeros(bsz, q_len, q_embed)
+            else:
+                # Gather selected keys/values
+                k_selected = key.new_zeros(bsz, max_important, k_embed)
+                v_selected = value.new_zeros(bsz, max_important, value.shape[-1])
+                kv_mask = torch.ones(bsz, max_important, dtype=torch.bool, device=query.device)
+                
+                for b in range(bsz):
+                    idx = key_important[b].nonzero(as_tuple=True)[0]
+                    n = idx.shape[0]
+                    k_selected[b, :n] = key[b, idx]
+                    v_selected[b, :n] = value[b, idx]
+                    kv_mask[b, :n] = False
 
-        # 5) Scatter results back to original positions
-        out = query.new_zeros(bsz, seq_len, embed)
-        for b in range(bsz):
-            idx = scatter_indices[b]
-            n = idx.shape[0]
-            out[b, idx] = out_gathered[b, :n]
+                # print(f"[SPARSE] Attention: query {query.shape} @ k_selected {k_selected.shape}")
+                out, attn = self.mha(query, k_selected, v_selected, key_padding_mask=kv_mask,
+                                      need_weights=need_weights, average_attn_weights=average_attn_weights)
 
-        # Convert back if needed
+        else:
+            # QUERY is larger -> pool queries, selected queries attend to all keys
+            # print(f"[SPARSE] QUERY is larger ({q_len} > {k_len}) -> pooling queries")
+            
+            query_important = self._select_important_blocks(query, key, pool_is_key=False)
+            
+            # Gather selected queries
+            batch_idx_list, token_idx_list = [], []
+            for b in range(bsz):
+                idx = query_important[b].nonzero(as_tuple=True)[0]
+                batch_idx_list.append(torch.full((idx.shape[0],), b, device=query.device, dtype=torch.long))
+                token_idx_list.append(idx)
+            
+            batch_indices = torch.cat(batch_idx_list)
+            token_indices = torch.cat(token_idx_list)
+            total_selected = len(batch_indices)
+
+            if total_selected == 0:
+                out = query.new_zeros(bsz, q_len, q_embed)
+            else:
+                q_selected = query[batch_indices, token_indices]  # (total_selected, q_embed)
+
+                # Expand key/value to match selected queries batch-wise
+                # We need to run attention per-batch or use a trick
+                # Simplest: run as single batch with all selected queries
+                # But they need to attend to their own batch's keys
+                
+                # For efficiency, pad selected queries per batch and run batched attention
+                max_selected = int(query_important.sum(dim=1).max().item())
+                q_padded = query.new_zeros(bsz, max_selected, q_embed)
+                q_mask = torch.ones(bsz, max_selected, dtype=torch.bool, device=query.device)
+                
+                scatter_indices = []
+                for b in range(bsz):
+                    idx = query_important[b].nonzero(as_tuple=True)[0]
+                    n = idx.shape[0]
+                    q_padded[b, :n] = query[b, idx]
+                    q_mask[b, :n] = False
+                    scatter_indices.append(idx)
+
+                # print(f"[SPARSE] Attention: q_selected {q_padded.shape} @ key {key.shape}")
+                
+                # Selected queries attend to ALL keys
+                out_selected, attn = self.mha(q_padded, key, value, key_padding_mask=key_padding_mask,
+                                               need_weights=need_weights, average_attn_weights=average_attn_weights)
+
+                # Scatter back to original positions (non-selected get zeros)
+                out = query.new_zeros(bsz, q_len, q_embed)
+                for b in range(bsz):
+                    idx = scatter_indices[b]
+                    n = idx.shape[0]
+                    out[b, idx] = out_selected[b, :n]
+
+        # print(f"[SPARSE] Output: {out.shape}")
+        # print("=" * 60)
+
         if not self._batch_first:
             out = out.transpose(0, 1)
 
