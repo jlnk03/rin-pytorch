@@ -26,6 +26,12 @@ rin:
   cond_decoupled_read: false
   xattn_enc_ln: false
   num_classes: 10
+  # Hierarchical sparse attention: coarse-to-fine selection
+  sparse_hierarchy:
+    - block_size: 4
+      critical_ratio: 0.5
+    - block_size: 2
+      critical_ratio: 0.25
 
 diffusion:
   train_schedule: "sigmoid@-3,3,0.9"
@@ -39,7 +45,7 @@ diffusion:
 
 trainer:
   num_classes: 10
-  train_num_steps: 150000
+  train_num_steps: 300000
   train_batch_size: 256
   split_batches: true
   fp16: false

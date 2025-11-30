@@ -3,7 +3,7 @@ import torch.nn as nn
 
 from .DropPath import DropPath
 from .MLP import MLP
-from .SparseAttention import SparseMultiheadAttention
+from .SparseAttention import HierarchicalSparseAttention
 
 
 class TransformerDecoderLayer(torch.nn.Module):
@@ -22,8 +22,7 @@ class TransformerDecoderLayer(torch.nn.Module):
         use_enc_ln=False,
         use_ffn_ln=False,
         ln_scale_shift=True,
-        block_size=4,
-        critical_ratio=0.25,
+        sparse_hierarchy=None,  # List of {'block_size': int, 'critical_ratio': float}
     ):
         super().__init__()
         self.self_attention = self_attention
@@ -32,13 +31,12 @@ class TransformerDecoderLayer(torch.nn.Module):
         
         if self_attention:
             self.self_ln = nn.LayerNorm(dim, eps=1e-6, elementwise_affine=ln_scale_shift)
-            self.self_mha = SparseMultiheadAttention(
+            self.self_mha = HierarchicalSparseAttention(
                 embed_dim=dim, 
                 num_heads=num_heads, 
                 dropout=drop_att,
                 batch_first=True,
-                block_size=block_size,
-                critical_ratio=critical_ratio,
+                sparse_hierarchy=sparse_hierarchy,
             )
             
         if cross_attention:
@@ -57,15 +55,14 @@ class TransformerDecoderLayer(torch.nn.Module):
                 self.enc_ln = nn.Identity()
                 
             dim_x_att = dim if dim_x_att is None else dim_x_att
-            self.cross_mha = SparseMultiheadAttention(
+            self.cross_mha = HierarchicalSparseAttention(
                 embed_dim=dim,
                 num_heads=num_heads,
                 kdim=dim_x_att,
                 vdim=dim_x_att,
                 dropout=drop_att,
                 batch_first=True,
-                block_size=block_size,
-                critical_ratio=critical_ratio,
+                sparse_hierarchy=sparse_hierarchy,
             )
             
         if use_mlp:

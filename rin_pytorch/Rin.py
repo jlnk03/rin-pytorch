@@ -41,8 +41,10 @@ class Rin(torch.nn.Module):
         cond_decoupled_read=False,
         xattn_enc_ln=False,
         num_classes=None,
+        sparse_hierarchy=None,
     ):
         super().__init__()
+        self._sparse_hierarchy = sparse_hierarchy
 
         self._image_height = image_height
         self._image_width = image_width
@@ -127,6 +129,7 @@ class Rin(torch.nn.Module):
                     cross_attention=True,
                     use_mlp=True,
                     use_enc_ln=xattn_enc_ln,
+                    sparse_hierarchy=sparse_hierarchy,
                 )
             )
             if cond_decoupled_read:
@@ -143,6 +146,7 @@ class Rin(torch.nn.Module):
                         cross_attention=True,
                         use_mlp=True,
                         use_enc_ln=xattn_enc_ln,
+                        sparse_hierarchy=sparse_hierarchy,
                     )
                 )
             if num_layers_per_readwrite == 0:
@@ -162,6 +166,7 @@ class Rin(torch.nn.Module):
                         cross_attention=True,
                         use_mlp=True if tape_mlp_ratio > 0 else False,
                         use_enc_ln=xattn_enc_ln,
+                        sparse_hierarchy=sparse_hierarchy,
                     )
                 )
                 self.latent_processing_units.append(
