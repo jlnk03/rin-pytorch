@@ -40,8 +40,8 @@ diffusion:
 
 trainer:
   num_classes: 1000
-  train_num_steps: 150000
-  train_batch_size: 512
+  train_num_steps: 300000
+  train_batch_size: 256
   split_batches: true
   fp16: false
   lr_scheduler_name: "cosine"
@@ -62,7 +62,7 @@ trainer:
     iterations: 100
     method: "ddim"
   checkpoint_folder: "/home/stud/ljul/storage/user/imagenet/"
-  run_name: "rin_imagenet_flex_64"
+  run_name: "rin_imagenet_flex_64_vanilla_300k"
   log_to_wandb: true
   log_every_n_steps: 10
   profile_flops: true
