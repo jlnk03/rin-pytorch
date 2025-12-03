@@ -5,16 +5,16 @@
 #SBATCH --clusters=hpda2
 #SBATCH --partition=hpda2_compute_gpu
 #SBATCH --exclude=hpdar04c05s03,hpdar04c03s01
-#SBATCH --nodes=4
+#SBATCH --nodes=2
 #SBATCH --ntasks-per-node=4
 #SBATCH --gres=gpu:4
 #SBATCH --mem=256G
-#SBATCH --time=6-00:00:00
+#SBATCH --time=5-00:00:00
 
 echo "Starting the job"
 echo "Job ID: $SLURM_JOB_ID"
 # srun python train.py --config configs/128.yaml --resume_checkpoint /dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/imagenet/imagenet_nested_self_cond_20250828_160901/last.ckpt --wandb_resume jh8wzvv8
 # srun python train.py --config configs/cifar.yaml
 # srun python train.py --config configs/128.yaml --resume_checkpoint /dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/imagenet/imagenet_flex_nested_20251113_052300/last.ckpt
-srun python train.py --config configs/128.yaml
+srun python train.py --config configs/64.yaml
 echo "Job finished"

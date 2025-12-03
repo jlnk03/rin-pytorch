@@ -16,19 +16,20 @@ def _concat_tokens(*tokens: torch.Tensor | None) -> torch.Tensor:
     # tokens in shape [..., n, d]
     return torch.cat([t for t in tokens if t is not None], -2)
 
-def _concat_tokens_interleave(latent: torch.Tensor, cond: torch.Tensor, latent_slots_per_sample: int) -> torch.Tensor:
+def _concat_tokens_interleave(latent: torch.Tensor, extra_tokens: torch.Tensor, latent_slots_per_sample: int) -> torch.Tensor:
     """
-    Interleave conditioning tokens into flattened latent tokens using native PyTorch operations.
+    Interleave per-sample auxiliary tokens (conditioning, time embeddings, etc.)
+    into flattened latent tokens using native PyTorch operations.
     
     Args:
         latent: [total_latent_tokens, latent_dim] - flattened latent tokens from all samples
-        cond: [batch_size, cond_tokens_per_sample, cond_dim] - conditioning tokens per sample  
+        extra_tokens: [batch_size, tokens_per_sample, latent_dim] - auxiliary tokens per sample
         latent_slots_per_sample: number of latent slots per sample
         
     Returns:
         [total_tokens, dim] - interleaved latent and conditioning tokens
     """
-    batch_size = cond.shape[0]
+    batch_size = extra_tokens.shape[0]
     latent_dim = latent.shape[1]
 
     # print(f'latent: {latent.shape}, cond: {cond.shape}')
@@ -39,8 +40,8 @@ def _concat_tokens_interleave(latent: torch.Tensor, cond: torch.Tensor, latent_s
     latent_reshaped = latent.view(batch_size, latent_slots_per_sample, latent_dim)
     
     # Use torch.cat to concatenate along token dimension for each sample
-    # Stack latent and cond along a new dimension, then flatten
-    result = torch.cat([latent_reshaped, cond], dim=1)  # [batch_size, latent_slots + cond_tokens, latent_dim]
+    # Stack latent and auxiliary tokens along a new dimension, then flatten
+    result = torch.cat([latent_reshaped, extra_tokens], dim=1)  # [batch_size, latent_slots + extra_tokens, latent_dim]
     
     # Flatten back to [total_tokens, latent_dim]
     result = result.view(-1, latent_dim)
@@ -105,8 +106,8 @@ class Rin(torch.nn.Module):
         self._latent_slots = latent_slots
         self._time_on_latent = time_on_latent
         self._cond_on_latent = cond_on_latent_n > 0
-        # if self._time_on_latent:  # replace 1 latent with time emb.
-        #     latent_slots -= 1
+        if self._time_on_latent:  # replace 1 latent with time emb.
+            latent_slots -= 1
         # TODO: add proper conditioning
         latent_slots -= cond_on_latent_n
         self._latent_dim = latent_dim
@@ -317,8 +318,25 @@ class Rin(torch.nn.Module):
         self,
         t: torch.Tensor | None,
         cond: torch.Tensor | None,
+        offsets: torch.Tensor | None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        batch_size = None
+        if cond is not None:
+            batch_size = cond.shape[0]
+        elif offsets is not None:
+            batch_size = offsets.shape[0] - 1
         if t is not None:
+            if not torch.is_tensor(t):
+                raise TypeError("Expected timestep tensor when conditioning on time.")
+            if t.ndim > 1:
+                t = t.view(t.shape[0], -1).squeeze(-1)
+            if batch_size is None:
+                batch_size = t.shape[0]
+            if t.shape[0] != batch_size:
+                if offsets is None:
+                    raise ValueError("Offsets are required to align token-level timesteps with latent documents.")
+                doc_start_indices = offsets[:-1].to(t.device)
+                t = t[doc_start_indices]
             t = self.time_emb(t, last_swish=False, normalize=True)
             t = rearrange(t, "b d -> b 1 d")
         if cond is not None:
@@ -383,19 +401,23 @@ class Rin(torch.nn.Module):
         # print(f'batch_size init: {batch_size}')
         latent = latent.repeat(batch_size, 1)
 
-        # Add conditioning tokens by interleaving them with latent tokens
-        if self._cond_on_latent and cond is not None:
-            
-            actual_latent_slots_per_sample = latent.shape[0] // batch_size
-            latent = _concat_tokens_interleave(latent, cond, actual_latent_slots_per_sample)
-            
-            # Update offsets to account for conditioning tokens
-            cond_tokens_per_sample = cond.shape[1]
-            tokens_per_sample = actual_latent_slots_per_sample + cond_tokens_per_sample
+        actual_latent_slots_per_sample = latent.shape[0] // batch_size
+        tokens_per_sample = actual_latent_slots_per_sample
 
-            # print(f'latent: {latent.shape}, cond: {cond.shape}, actual_latent_slots_per_sample: {actual_latent_slots_per_sample}, cond_tokens_per_sample: {cond_tokens_per_sample}, tokens_per_sample: {tokens_per_sample}')
-        else:
-            tokens_per_sample = latent.shape[0] // batch_size
+        # Collect auxiliary tokens (time embeddings, conditioning, etc.)
+        aux_tokens: torch.Tensor | None = None
+        if self._time_on_latent and time_emb is not None:
+            aux_tokens = time_emb if aux_tokens is None else torch.cat(
+                (aux_tokens, time_emb), dim=1)
+        if self._cond_on_latent and cond is not None:
+            aux_tokens = cond if aux_tokens is None else torch.cat(
+                (aux_tokens, cond), dim=1)
+
+        # Add auxiliary tokens by interleaving them with latent tokens
+        if aux_tokens is not None:
+            latent = _concat_tokens_interleave(
+                latent, aux_tokens, actual_latent_slots_per_sample)
+            tokens_per_sample += aux_tokens.shape[1]
         
         # Create latent offsets and document IDs
         latent_offsets = torch.arange(0, batch_size + 1, device=latent.device, dtype=torch.int64) * tokens_per_sample
@@ -622,7 +644,7 @@ class Rin(torch.nn.Module):
         if self._cond_on_latent and cond is None:
             raise ValueError("cond is None but cond_on_latent is True")
 
-        time_emb, cond = self.initialize_cond(t, cond)
+        time_emb, cond = self.initialize_cond(t, cond, offsets)
         tape, tape_r = self.initialize_tape(
             x, time_emb, cond, pos_embs, offsets, offsets_pos_embs, document_ids, tape_prev)
         latent, latent_document_ids = self.initialize_latent(bs, time_emb, cond, latent_prev)

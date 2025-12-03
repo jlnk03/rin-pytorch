@@ -398,12 +398,12 @@ class RinLightningModule(LightningModule):
             print(f"FLOPs/step_G: {step_total_flops / 1e9}")
 
             # Log as metrics (reliable across logger types)
-            self.log("FLOPs/forward_total", torch.tensor(fwd_flops), on_step=True, prog_bar=False, logger=True)
-            self.log("FLOPs/backward_total", torch.tensor(bwd_flops), on_step=True, prog_bar=False, logger=True)
-            self.log("FLOPs/step_total", torch.tensor(step_total_flops), on_step=True, prog_bar=False, logger=True)
-            self.log("FLOPs/forward_G", torch.tensor(fwd_flops / 1e9), on_step=True, prog_bar=False, logger=True)
-            self.log("FLOPs/backward_G", torch.tensor(bwd_flops / 1e9), on_step=True, prog_bar=False, logger=True)
-            self.log("FLOPs/step_G", torch.tensor(step_total_flops / 1e9), on_step=True, prog_bar=False, logger=True)
+            self.log("FLOPs/forward_total", torch.tensor(fwd_flops), on_step=True, prog_bar=False, logger=True, batch_size=self.hparams["trainer"]["train_batch_size"])
+            self.log("FLOPs/backward_total", torch.tensor(bwd_flops), on_step=True, prog_bar=False, logger=True, batch_size=self.hparams["trainer"]["train_batch_size"])
+            self.log("FLOPs/step_total", torch.tensor(step_total_flops), on_step=True, prog_bar=False, logger=True, batch_size=self.hparams["trainer"]["train_batch_size"])
+            self.log("FLOPs/forward_G", torch.tensor(fwd_flops / 1e9), on_step=True, prog_bar=False, logger=True, batch_size=self.hparams["trainer"]["train_batch_size"])
+            self.log("FLOPs/backward_G", torch.tensor(bwd_flops / 1e9), on_step=True, prog_bar=False, logger=True, batch_size=self.hparams["trainer"]["train_batch_size"])
+            self.log("FLOPs/step_G", torch.tensor(step_total_flops / 1e9), on_step=True, prog_bar=False, logger=True, batch_size=self.hparams["trainer"]["train_batch_size"])
 
             # Best-effort: also push to WandB summary if available
             try:
@@ -461,7 +461,7 @@ class RinLightningModule(LightningModule):
 
         # Prefer: log tensors to avoid graph breaks; LR is handled by LearningRateMonitor
         # Expose to callbacks (e.g., ModelCheckpoint) but do not send to external loggers
-        self.log("loss", loss.detach(), on_step=True, on_epoch=True, prog_bar=True, logger=False, sync_dist=True)
+        self.log("loss", loss.detach(), on_step=True, on_epoch=True, prog_bar=True, logger=False, sync_dist=True, batch_size=self.hparams["trainer"]["train_batch_size"])
 
         # If you still want to log LR yourself, convert to a tensor (optional)
         # lr_tensor = torch.tensor(sch.get_last_lr()[0], device=loss.device)
