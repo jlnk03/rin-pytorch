@@ -114,6 +114,7 @@ class FlexMultiheadAttention(nn.Module):
             nn.init.xavier_uniform_(self.k_proj_weight)
             nn.init.xavier_uniform_(self.v_proj_weight)
         nn.init.constant_(self.in_proj_bias, 0.0)
+        # Note: out_proj.weight uses nn.Linear default (kaiming_uniform_) to match nn.MHA
         if self.out_proj.bias is not None:
             nn.init.constant_(self.out_proj.bias, 0.0)
 
@@ -167,12 +168,15 @@ class FlexMultiheadAttention(nn.Module):
 
             score_mod = _score_mod
 
+        # Explicitly set scale to match nn.MultiheadAttention: 1/sqrt(head_dim)
+        scale = 1.0 / (self.head_dim ** 0.5)
         attn_output = flex_attention(
             query_states,
             key_states,
             value_states,
             block_mask=block_mask,
             score_mod=score_mod,
+            scale=scale,
         )
 
         attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, l_query, self.num_heads * self.head_dim)

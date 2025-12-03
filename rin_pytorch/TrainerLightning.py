@@ -124,7 +124,8 @@ class RinLightningModule(LightningModule):
 
         with profiler_ctx as prof:
             loss = self.forward(patches, pos_embs, batch_class, offsets, pos_offsets, document_ids)
-            self.manual_backward(loss)
+
+        self.manual_backward(loss)
 
         self._grad_accum_counter += 1
 
@@ -171,6 +172,7 @@ class RinLightningModule(LightningModule):
 
         if profiling_active and prof is not None:
             total_flops = sum(event.flops for event in prof.key_averages() if event.flops)
+            total_flops = total_flops / labels.size(0)
             if total_flops:
                 self.log(
                     "profiler/total_flops",
@@ -188,7 +190,7 @@ class RinLightningModule(LightningModule):
                     logger=True,
                     sync_dist=False,
                 )
-                self.print(f"Profiled FLOPs (first forward/backward): {total_flops / 1e12:.4f} TFLOPs")
+                self.print(f"Profiled FLOPs (first forward) per sample: {total_flops:.4g} GFLOPs")
             else:
                 self.print("Profiler executed but no FLOPs information was collected.")
             self._should_profile_first_step = False

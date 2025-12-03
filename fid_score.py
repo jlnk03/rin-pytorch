@@ -11,7 +11,13 @@ from torchvision import transforms
 from torchvision.models import inception_v3
 from tqdm import tqdm
 
-from rin_pytorch.data import DEFAULT_CIFAR_ROOT, FlexibleCIFAR10
+from rin_pytorch.data import DEFAULT_CIFAR_ROOT, DEFAULT_IMAGENET_ROOT, FlexibleCIFAR10
+import torchvision
+
+import os
+import pickle
+
+save_path = "statistics/mu_sigma_dataset1.pkl"
 
 
 FID_TRANSFORM = transforms.Compose(
@@ -49,6 +55,18 @@ class FlexibleCIFARImageDataset(Dataset):
         image, _ = self.dataset[idx]
         return image
 
+
+class ImageNetImageDataset(Dataset):
+    def __init__(self, root_dir: str, transform):
+        self.dataset = torchvision.datasets.ImageFolder(root=root_dir, transform=transform)
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        image, _ = self.dataset[idx]
+        return image
+
 def get_inception_model():
     model = inception_v3(pretrained=True, transform_input=False)
     model.fc = nn.Identity()  # Remove final FC layer
@@ -70,8 +88,21 @@ def calculate_activation_statistics(dataloader, model, device):
     
     return mu, sigma
 
+
+
+def save_statistics(mu, sigma, save_path):
+    with open(save_path, 'wb') as f:
+        pickle.dump({'mu': mu, 'sigma': sigma}, f)
+
+def load_statistics(save_path):
+    with open(save_path, 'rb') as f:
+        stats = pickle.load(f)
+    return stats['mu'], stats['sigma']
+
 def calculate_fid(mu1, sigma1, mu2, sigma2):
     """Calculate Frechet Distance between two multivariate Gaussians."""
+
+
     diff = mu1 - mu2
     covmean, _ = linalg.sqrtm(sigma1.dot(sigma2), disp=False)
     
@@ -97,6 +128,10 @@ def main():
                        help="Flexible CIFAR-10 split to use when --flexible_cifar is set.")
     parser.add_argument("--cifar_root", type=str, default=None,
                        help=f"Root directory for Flexible CIFAR-10. Defaults to '{DEFAULT_CIFAR_ROOT}'.")
+    parser.add_argument("--imagenet", action="store_true",
+                       help="Use ImageNet for the first dataset.")
+    parser.add_argument("--imagenet_root", type=str, default=None,
+                       help=f"Root directory for ImageNet. Defaults to '{DEFAULT_IMAGENET_ROOT}'.")
     parser.add_argument("--batch_size", type=int, default=64,
                        help="Batch size for processing")
     args = parser.parse_args()
@@ -112,9 +147,15 @@ def main():
             train=args.cifar_split == "train",
             transform=FID_TRANSFORM,
         )
+    elif args.imagenet:
+        imagenet_root = args.imagenet_root or DEFAULT_IMAGENET_ROOT
+        dataset1 = ImageNetImageDataset(
+            root_dir=imagenet_root,
+            transform=FID_TRANSFORM,
+        )
     else:
         if args.path1 is None:
-            parser.error("--path1 is required when --flexible_cifar is not set.")
+            parser.error("--path1 is required when --flexible_cifar or --imagenet is not set.")
         dataset1 = ImageFolderDataset(args.path1, transform=FID_TRANSFORM)
 
     dataset2 = ImageFolderDataset(args.path2, transform=FID_TRANSFORM)
@@ -128,7 +169,11 @@ def main():
     model = get_inception_model().to(device)
 
     print("Calculating statistics for first dataset...")
-    mu1, sigma1 = calculate_activation_statistics(dataloader1, model, device)
+    if os.path.exists(save_path):
+        mu1, sigma1 = load_statistics(save_path)
+    else:
+        mu1, sigma1 = calculate_activation_statistics(dataloader1, model, device)
+        save_statistics(mu1, sigma1, save_path)
     
     print("Calculating statistics for second dataset...")
     mu2, sigma2 = calculate_activation_statistics(dataloader2, model, device)

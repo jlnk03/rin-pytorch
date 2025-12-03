@@ -11,5 +11,5 @@
 echo "Starting the job"
 echo "Job ID: $SLURM_JOB_ID"
 # srun python train_cifar10.py
-srun python train_lightning.py --config configs/cifar.yaml
+srun python train_lightning.py --config configs/cifar.yaml --resume_checkpoint /home/stud/ljul/storage/user/cifar/rin_cifar_nested_300k_20251201_152908/last.ckpt --wandb_resume 4q66wkia
 echo "Job finished"

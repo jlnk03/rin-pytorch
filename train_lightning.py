@@ -230,10 +230,13 @@ def build_dataloader(config, data_root: str):
     else:
         dataset = torchvision.datasets.ImageFolder(root=data_root, transform=transform)
 
+    # Pass max image dimensions to ensure consistent position embeddings across all image sizes
     collate_fn = lambda batch: pack_batch_to_ragged(
         batch,
         patch_size=rin_cfg["patch_size"],
         tape_dim=rin_cfg["tape_dim"],
+        max_image_height=rin_cfg["image_height"],
+        max_image_width=rin_cfg["image_width"],
     )
 
     return DataLoader(

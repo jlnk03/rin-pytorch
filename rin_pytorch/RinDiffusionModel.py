@@ -21,6 +21,8 @@ class RinDiffusionModel(torch.nn.Module):
         conditional: str = "class",
         self_cond_rate: float = 0.9,
         loss_type: str = "x",
+        cond_dropout: float = 0.0,
+        guidance: float = 0.0,
     ):
         super().__init__()
         self._inference_schedule = inference_schedule
@@ -30,6 +32,8 @@ class RinDiffusionModel(torch.nn.Module):
         self._conditional = conditional
         self._self_cond_rate = self_cond_rate
         self._loss_type = loss_type
+        self._cond_dropout = cond_dropout
+        self._guidance = guidance
 
         self.scheduler = diffusion_utils.Scheduler(train_schedule)
         self.denoiser = rin
@@ -124,6 +128,9 @@ class RinDiffusionModel(torch.nn.Module):
         latent_prev = None
         tape_prev = None
 
+        guidance_scale = max(self._guidance, 0.0) if cond is not None else 0.0
+        cond_null = torch.zeros_like(cond) if (cond is not None and guidance_scale > 0.0) else None
+
         for t in tqdm(torch.arange(iterations, dtype=torch.float32, device=device), desc="sampling", leave=False):
             time_step = _get_step(t)
             time_step_p = torch.max(_get_step(t + 1), torch.tensor(0.0, device=device))
@@ -133,7 +140,7 @@ class RinDiffusionModel(torch.nn.Module):
             gamma_tokens = torch.repeat_interleave(gamma, patches_per_sample, dim=0).unsqueeze(-1)
             gamma_prev_tokens = torch.repeat_interleave(gamma_prev, patches_per_sample, dim=0).unsqueeze(-1)
 
-            pred_out, latent_prev, tape_prev = self.denoise(
+            pred_cond, latent_prev, tape_prev = self.denoise(
                 samples_flat,
                 gamma_tokens,
                 cond,
@@ -144,8 +151,22 @@ class RinDiffusionModel(torch.nn.Module):
                 latent_prev,
                 tape_prev,
             )
+            final_pred = pred_cond
+            if guidance_scale > 0.0 and cond_null is not None:
+                pred_uncond, _, _ = self.denoise(
+                    samples_flat,
+                    gamma_tokens,
+                    cond_null,
+                    pos_flat,
+                    offsets,
+                    pos_offsets,
+                    document_ids,
+                    latent_prev,
+                    tape_prev,
+                )
+                final_pred = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
 
-            x0_eps = diffusion_utils.get_x0_eps(samples_flat, gamma_tokens, pred_out, self._pred_type, truncate_noise=True, clip_x0=True)
+            x0_eps = diffusion_utils.get_x0_eps(samples_flat, gamma_tokens, final_pred, self._pred_type, truncate_noise=True, clip_x0=True)
             noise_pred, data_pred = x0_eps["noise_pred"], x0_eps["data_pred"]
             samples_flat = self.scheduler.transition_step(
                 samples=samples_flat,
@@ -157,7 +178,10 @@ class RinDiffusionModel(torch.nn.Module):
             )
 
         data_pred = data_pred.view(num_samples, seq_len, patch_dim)
-        images = unpatchify(data_pred * 0.5 + 0.5, patch_size, channels, target_height, target_width)
+        tokens = data_pred * 0.5 + 0.5  # convert -1,1 -> 0,1
+        tokens.clamp_(0.0, 1.0)
+        images = unpatchify(tokens, patch_size, channels, target_height, target_width)
+        # images = unpatchify(data_pred * 0.5 + 0.5, patch_size, channels, target_height, target_width)
         return images
 
     def noise_denoise(
@@ -189,6 +213,8 @@ class RinDiffusionModel(torch.nn.Module):
 
         latent_prev = None
         tape_prev = None
+
+        labels = self._apply_cond_dropout(labels)
 
         use_self_cond = (
             self._self_cond != "none"
@@ -267,3 +293,13 @@ class RinDiffusionModel(torch.nn.Module):
             document_ids,
         )
         return self.compute_loss(data, noise, pred_dict)
+
+    def _apply_cond_dropout(self, labels: torch.Tensor | None, force_drop: bool = False):
+        if labels is None:
+            return None
+        if force_drop:
+            return torch.zeros_like(labels)
+        if self._cond_dropout <= 0.0:
+            return labels
+        drop_mask = (torch.rand(labels.size(0), device=labels.device) > self._cond_dropout).float().unsqueeze(-1)
+        return labels * drop_mask
