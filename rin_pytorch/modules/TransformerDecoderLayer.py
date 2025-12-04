@@ -6,6 +6,9 @@ from .MLP import MLP
 from .SparseAttention import HierarchicalSparseAttention
 
 
+# HierachicalSparseAttention = torch.compile(HierarchicalSparseAttention, dynamic=True)
+
+
 class TransformerDecoderLayer(torch.nn.Module):
     def __init__(
         self,
@@ -36,7 +39,7 @@ class TransformerDecoderLayer(torch.nn.Module):
                 num_heads=num_heads, 
                 dropout=drop_att,
                 batch_first=True,
-                sparse_hierarchy=sparse_hierarchy,
+                hierarchy=sparse_hierarchy,
             )
             
         if cross_attention:
@@ -62,7 +65,7 @@ class TransformerDecoderLayer(torch.nn.Module):
                 vdim=dim_x_att,
                 dropout=drop_att,
                 batch_first=True,
-                sparse_hierarchy=sparse_hierarchy,
+                hierarchy=sparse_hierarchy,
             )
             
         if use_mlp:

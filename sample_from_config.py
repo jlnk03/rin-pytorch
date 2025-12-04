@@ -5,6 +5,7 @@ import yaml
 
 import torch
 from rin_pytorch import Rin, RinDiffusionModel
+from rin_pytorch.modules.SparseAttention import AttentionVisualizer
 from torchvision.utils import save_image
 from tqdm import tqdm
 
@@ -42,6 +43,8 @@ def sample_from_config(
     image_width=None,
     make_grid=False,
     grid_nrow=None,
+    visualize_attention=False,
+    attention_output_dir=None,
 ):
     # Load configuration
     config = load_config(config_path)
@@ -136,6 +139,19 @@ def sample_from_config(
     # Use EMA model for sampling
     ema_diffusion_model.eval()
 
+    # Setup attention visualization if enabled
+    visualizer = None
+    if visualize_attention:
+        attn_dir = Path(attention_output_dir) if attention_output_dir else output_dir / "attention_vis"
+        attn_dir.mkdir(exist_ok=True, parents=True)
+        visualizer = AttentionVisualizer(
+            ema_diffusion_model,
+            image_size=image_height,
+            patch_size=rin_config["patch_size"],
+        )
+        visualizer.enable()
+        print(f"Attention visualization enabled. Saving to {attn_dir}")
+
     # Calculate number of batches
     num_batches = math.ceil(num_samples / batch_size)
     samples_left = num_samples
@@ -160,6 +176,21 @@ def sample_from_config(
             rin_config["tape_dim"],
             class_label,
         )
+
+        # Save attention visualizations if enabled
+        if visualizer is not None:
+            visualizer.save_all_attention(
+                save_dir=str(attn_dir),
+                step=batch_idx,
+                sample_idx=0,  # Visualize first sample in batch
+                num_latent_samples=3,
+            )
+            # Also create a combined grid for all blocks
+            visualizer.visualize_single_step(
+                step=batch_idx,
+                save_dir=str(attn_dir),
+                sample_idx=0,
+            )
 
         if make_grid:
             # Images-per-row in grid
@@ -188,6 +219,11 @@ def sample_from_config(
         # Clear GPU memory
         del samples
         torch.cuda.empty_cache()
+
+    # Disable attention capture
+    if visualizer is not None:
+        visualizer.disable()
+        print(f"Attention visualizations saved to {attn_dir}")
 
     print(f"Done! Generated {num_samples} samples saved to {output_dir}")
 
@@ -219,6 +255,19 @@ def main():
         default=None,
         help="Number of images per row in the grid (default: min(8, batch_size))",
     )
+    
+    # Attention visualization options
+    parser.add_argument(
+        "--visualize_attention",
+        action="store_true",
+        help="If set, save attention visualizations showing where the model focuses",
+    )
+    parser.add_argument(
+        "--attention_output_dir",
+        type=str,
+        default=None,
+        help="Directory to save attention visualizations (default: output_dir/attention_vis)",
+    )
 
     args = parser.parse_args()
 
@@ -235,6 +284,8 @@ def main():
         image_width=args.image_width,
         make_grid=args.grid,
         grid_nrow=args.grid_nrow,
+        visualize_attention=args.visualize_attention,
+        attention_output_dir=args.attention_output_dir,
     )
 
 
