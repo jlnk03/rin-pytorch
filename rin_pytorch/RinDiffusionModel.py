@@ -44,8 +44,10 @@ class RinDiffusionModel(torch.nn.Module):
         cond: torch.Tensor | None,
         latent_prev: torch.Tensor | None = None,
         tape_prev: torch.Tensor | None = None,
-        tape_padding_mask: torch.Tensor | None = None,
+        # tape_padding_mask: torch.Tensor | None = None,
         tape_pos_emb: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+        doc_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         gamma = gamma.squeeze()
         assert gamma.ndim == 1
@@ -55,8 +57,10 @@ class RinDiffusionModel(torch.nn.Module):
             cond,
             latent_prev,
             tape_prev,
-            tape_padding_mask=tape_padding_mask,
+            # tape_padding_mask=tape_padding_mask,
             tape_pos_emb=tape_pos_emb,
+            offsets=offsets,
+            doc_ids=doc_ids,
         )
         return output, latent, tape
 
@@ -120,13 +124,21 @@ class RinDiffusionModel(torch.nn.Module):
         if auto_pos_emb is not None:
             auto_pos_emb = auto_pos_emb.to(device)
 
-        get_step = lambda t: torch.full([num_samples, 1, 1], 1.0 - t / iterations, device=device)
+        # Create doc_ids and offsets for packed format (all samples have same seq_len)
+        doc_ids = torch.arange(num_samples, device=device).repeat_interleave(seq_len)
+        offsets = torch.arange(num_samples + 1, device=device) * seq_len
+
+        # Pack positional embeddings: [num_samples, seq_len, dim] -> [num_samples * seq_len, dim]
+        auto_pos_emb_packed = auto_pos_emb.reshape(-1, auto_pos_emb.shape[-1])
+
+        get_step = lambda t: torch.full([num_samples], 1.0 - t / iterations, device=device)
         if self._inference_schedule is None:
             time_transform = self.scheduler.time_transform
         else:
             time_transform = self.scheduler.get_time_transform(self._inference_schedule)
 
-        samples = self.scheduler.sample_noise(samples_shape, device=device, seed=seed)
+        # Sample noise in packed format: [num_samples * seq_len, patch_dim]
+        samples = self.scheduler.sample_noise([num_samples * seq_len, patch_dim], device=device, seed=seed)
         data_pred = torch.zeros_like(samples, device=device)
 
         latent_prev = None
@@ -139,8 +151,12 @@ class RinDiffusionModel(torch.nn.Module):
             torch.arange(iterations, dtype=torch.float32, device=device), desc="sampling", leave=False, position=1
         ):
             time_step = get_step(t)
-            time_step_p = torch.max(get_step(t + 1), torch.tensor(0.0, device=device))
+            time_step_p = torch.clamp(get_step(t + 1), min=0.0)
             gamma, gamma_prev = time_transform(time_step), time_transform(time_step_p)
+            
+            # Expand gamma to per-token for diffusion math: [num_samples] -> [num_samples * seq_len, 1]
+            gamma_expanded = gamma[doc_ids].unsqueeze(-1)
+            gamma_prev_expanded = gamma_prev[doc_ids].unsqueeze(-1)
 
             pred_cond, latent_prev, tape_prev = self.denoise(
                 samples,
@@ -148,7 +164,9 @@ class RinDiffusionModel(torch.nn.Module):
                 cond,
                 latent_prev,
                 tape_prev,
-                tape_pos_emb=auto_pos_emb,
+                tape_pos_emb=auto_pos_emb_packed,
+                offsets=offsets,
+                doc_ids=doc_ids,
             )
             final_pred = pred_cond
             if guidance_scale > 0.0 and cond_null is not None:
@@ -158,24 +176,28 @@ class RinDiffusionModel(torch.nn.Module):
                     cond_null,
                     latent_prev,
                     tape_prev,
-                    tape_pos_emb=auto_pos_emb,
+                    tape_pos_emb=auto_pos_emb_packed,
+                    offsets=offsets,
+                    doc_ids=doc_ids,
                 )
                 final_pred = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
 
             x0_eps = diffusion_utils.get_x0_eps(
-                samples, gamma, final_pred, self._pred_type, truncate_noise=True, clip_x0=True
+                samples, gamma_expanded, final_pred, self._pred_type, truncate_noise=True, clip_x0=True
             )
             noise_pred, data_pred = x0_eps["noise_pred"], x0_eps["data_pred"]
             samples = self.scheduler.transition_step(
                 samples=samples,
                 data_pred=data_pred,
                 noise_pred=noise_pred,
-                gamma_now=gamma,
-                gamma_prev=gamma_prev,
+                gamma_now=gamma_expanded,
+                gamma_prev=gamma_prev_expanded,
                 sampler_name=method,
             )
 
-        tokens = data_pred * 0.5 + 0.5  # convert -1,1 -> 0,1
+        # Convert from packed [num_samples * seq_len, patch_dim] to batched [num_samples, seq_len, patch_dim]
+        tokens = data_pred.view(num_samples, seq_len, patch_dim)
+        tokens = tokens * 0.5 + 0.5  # convert -1,1 -> 0,1
         tokens.clamp_(0.0, 1.0)
         images = unpatchify(tokens, patch_size, channels, target_height, target_width)
         return images
@@ -187,45 +209,68 @@ class RinDiffusionModel(torch.nn.Module):
         t: torch.Tensor | None = None,
         attn_mask: torch.Tensor | None = None,
         tape_pos_emb: torch.Tensor | None = None,
+        doc_ids: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
     ):
         tokens = tokens * 2.0 - 1.0
-        tokens_noised, noise, _, gamma = self.scheduler.add_noise(tokens, t=t)
+        tokens_noised, noise, gamma_per_doc, gamma = self.scheduler.add_noise(tokens, doc_ids, t=t)
 
-        bsz, seq_len, _ = tokens.size()
-        latent_prev = torch.zeros((bsz, *self.denoiser.latent_shape), device=tokens.device)
-        tape_prev = torch.zeros((bsz, seq_len, self.denoiser.tape_dim), device=tokens.device)
+        # bsz, seq_len, _ = tokens.size()
+        num_docs = doc_ids.max().item() + 1
+        # latent_prev = torch.zeros((bsz, *self.denoiser.latent_shape), device=tokens.device)
+        # tape_prev = torch.zeros((bsz, seq_len, self.denoiser.tape_dim), device=tokens.device)
 
-        if attn_mask is not None:
-            attn_mask = attn_mask.to(tokens.device).bool()
+        latent_prev = None
+        tape_prev = None
+
+        # if attn_mask is not None:
+        #     attn_mask = attn_mask.to(tokens.device).bool()
         if tape_pos_emb is not None:
             tape_pos_emb = tape_pos_emb.to(tokens.device)
 
         labels = self._apply_cond_dropout(labels)
 
-        if self._self_cond != "none" and self._self_cond_rate > 0.0:
-            mask = torch.rand(bsz, device=tokens.device) < self._self_cond_rate
+        latent_prev = None
+        tape_prev = None
 
-            if torch.any(mask):
+        if self._self_cond != "none" and self._self_cond_rate > 0.0:
+            # Determine which docs get self-conditioning (per-doc mask)
+            sc_mask = torch.rand(num_docs, device=tokens.device) < self._self_cond_rate
+
+            if torch.any(sc_mask):
                 with torch.no_grad():
                     _, latent_prev_out, tape_prev_out = self.denoise(
-                        x=tokens_noised[mask],
-                        gamma=gamma[mask],
-                        cond=labels[mask] if labels is not None else None,
-                        tape_padding_mask=attn_mask[mask] if attn_mask is not None else None,
-                        tape_pos_emb=tape_pos_emb[mask] if tape_pos_emb is not None else None,
+                        x=tokens_noised,
+                        gamma=gamma_per_doc,
+                        cond=labels if labels is not None else None,
+                        tape_pos_emb=tape_pos_emb if tape_pos_emb is not None else None,
+                        offsets=offsets,
+                        doc_ids=doc_ids,
                     )
-
-                latent_prev[mask] = latent_prev_out.detach()
-                tape_prev[mask] = tape_prev_out.detach()
+                    # Zero out latent_prev for docs that shouldn't get self-cond
+                    # latent_prev is [num_docs * latent_slots, latent_dim]
+                    latent_slots = self.denoiser._latent_slots
+                    latent_dim = self.denoiser._latent_dim
+                    latent_prev = latent_prev_out.detach().view(num_docs, latent_slots, latent_dim)
+                    latent_prev = latent_prev * sc_mask.view(-1, 1, 1)  # Zero out non-masked docs
+                    latent_prev = latent_prev.view(-1, latent_dim)
+                    
+                    # tape_prev is [total_tokens, tape_dim] - mask per-token based on doc membership
+                    # doc_ids tells us which doc each token belongs to
+                    tape_prev = tape_prev_out.detach()
+                    # Create per-token mask from per-doc mask: sc_mask[doc_ids] gives mask for each token
+                    token_mask = sc_mask[doc_ids].unsqueeze(-1)  # [total_tokens, 1]
+                    tape_prev = tape_prev * token_mask  # Zero out tokens from non-masked docs
 
         denoise_out, _, _ = self.denoise(
             tokens_noised,
-            gamma,
+            gamma_per_doc,
             labels,
             latent_prev,
             tape_prev,
-            tape_padding_mask=attn_mask,
             tape_pos_emb=tape_pos_emb,
+            offsets=offsets,
+            doc_ids=doc_ids,
         )
 
         pred_dict = diffusion_utils.get_x0_eps(
@@ -238,7 +283,6 @@ class RinDiffusionModel(torch.nn.Module):
         data: torch.Tensor,
         noise: torch.Tensor,
         pred_dict: dict[str, torch.Tensor],
-        mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self._loss_type == "x":
             target = data
@@ -250,13 +294,8 @@ class RinDiffusionModel(torch.nn.Module):
             raise ValueError(f"Unknown loss_type `{self._pred_type}`")
 
         diff = torch.nn.functional.mse_loss(pred, target, reduction="none")
-        if mask is not None:
-            weight = (~mask).float().unsqueeze(-1)
-            diff = diff * weight
-            denom = (weight.sum() * diff.size(-1)).clamp(min=1.0)
-            loss = diff.sum() / denom
-        else:
-            loss = diff.mean()
+
+        loss = diff.mean()
         return loss
 
     def forward(
@@ -266,18 +305,22 @@ class RinDiffusionModel(torch.nn.Module):
         t: torch.Tensor | None = None,
         attn_mask: torch.Tensor | None = None,
         tape_pos_emb: torch.Tensor | None = None,
+        doc_ids: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        mask = attn_mask
-        if mask is not None:
-            mask = mask.to(tokens.device).bool()
+        # mask = attn_mask
+        # if mask is not None:
+        #     mask = mask.to(tokens.device).bool()
         data, noise, _, pred_dict = self.noise_denoise(
             tokens,
             labels,
             t=t,
-            attn_mask=mask,
+            # attn_mask=mask,
             tape_pos_emb=tape_pos_emb,
+            doc_ids=doc_ids,
+            offsets=offsets,
         )
-        loss = self.compute_loss(data, noise, pred_dict, mask=mask)
+        loss = self.compute_loss(data, noise, pred_dict)
         return loss
 
     def _apply_cond_dropout(self, labels: torch.Tensor | None, force_drop: bool = False):

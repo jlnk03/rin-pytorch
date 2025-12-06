@@ -259,91 +259,156 @@ class Rin(torch.nn.Module):
         cond: torch.Tensor | None,
         tape_prev: torch.Tensor | None,
         external_tape_pos: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+        doc_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         tape_r = None
-        if not self._time_on_latent and time_emb is not None:
-            tape_r = time_emb
-        if not self._cond_on_latent and cond is not None:
-            tape_r = _concat_tokens(tape_r, cond)
+        # NOTE: With current config (time_on_latent=true, cond_on_latent_n=1),
+        # these conditions are false, so tape_r stays None
+        # if not self._time_on_latent and time_emb is not None:
+        #     tape_r = time_emb
+        # if not self._cond_on_latent and cond is not None:
+        #     tape_r = _concat_tokens(tape_r, cond)
 
-        if tokens.ndim != 3:
-            raise ValueError("Tokens must be a B x T x D tensor.")
         tape = self.token_proj(tokens)
-        tape_len = tape.size(1)
-
-        if external_tape_pos is not None:
-            tape_pos_emb = external_tape_pos
-            if tape_pos_emb.ndim == 2:
-                tape_pos_emb = tape_pos_emb.unsqueeze(0)
-            if tape_pos_emb.shape[:2] != tape.shape[:2]:
-                raise ValueError("External tape positional embeddings must match tape tokens.")
-        else:
-            tape_pos_emb = self._get_base_tape_pos(tape_len)
-
+        tape_pos_emb = external_tape_pos
         tape_pos_emb = tape_pos_emb.to(tape.device)
         tape = self.stem_ln(tape) + tape_pos_emb
 
-        if self._self_cond in ["tape", "latent+tape"] and tape_prev is not None:
-            tape = tape + self.tape_prev_ln(self.tape_prev_proj(tape_prev))
-        if self._cond_tape_writable and tape_r is not None:
-            tape, tape_r = _concat_tokens(tape, tape_r), None
+        # NOTE: With current config (self_cond="latent"), this is not hit
+        # if self._self_cond in ["tape", "latent+tape"] and tape_prev is not None:
+        #     tape = tape + self.tape_prev_ln(self.tape_prev_proj(tape_prev))
+        # if self._cond_tape_writable and tape_r is not None:
+        #     tape, tape_r = _concat_tokens(tape, tape_r), None
 
         return tape, tape_r
 
     def initialize_latent(
         self,
-        batch_size: int,
+        num_docs: int,
         time_emb: torch.Tensor | None,
         cond: torch.Tensor | None,
         latent_prev: torch.Tensor | None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Initialize latent as a packed sequence.
+        
+        Args:
+            num_docs: Number of documents in batch.
+            time_emb: Time embeddings [num_docs, 1, latent_dim] or None.
+            cond: Condition embeddings [num_docs, 1, latent_dim] or None.
+            latent_prev: Previous latent, packed [num_docs * latent_slots, latent_dim] or None.
+            
+        Returns:
+            latent: Packed latent sequence [total_latent_tokens, latent_dim]
+            latent_doc_ids: Document ID per latent token [total_latent_tokens]
+            latent_offsets: Cumulative offsets [num_docs + 1]
+        """
+        device = self.latent_pos_emb.device
+        
+        # Base latent positional embedding [latent_slots, latent_dim]
         latent = self.latent_pos_emb
         if self._latent_pos_encoding in ["sin_cos_plus_learned"]:
             latent = latent + self.latent_pos_emb_res
-        latent = latent.repeat(batch_size, 1, 1)
+        
+        # Expand for each document: [num_docs, latent_slots, latent_dim]
+        latent = latent.unsqueeze(0).expand(num_docs, -1, -1).clone()
+        
+        # print(latent.shape)
+        # print(latent_prev.shape)
+
+        # Concat time_emb and cond if needed (they're [num_docs, 1, latent_dim])
         if self._time_on_latent and time_emb is not None:
+            # print("time_emb.shape", time_emb.shape)
+            # print("latent.shape", latent.shape)
             latent = _concat_tokens(latent, time_emb)
         if self._cond_on_latent and cond is not None:
+            # print("cond.shape", cond.shape)
+            # print("latent.shape", latent.shape)
             latent = _concat_tokens(latent, cond)
+        
+        # Add latent_prev if provided (reshape from packed to batched first)
         if self._self_cond in ["latent", "latent+tape"] and latent_prev is not None:
-            latent = latent + self.latent_prev_ln(self.latent_prev_proj(latent_prev))
-        return latent
+            # latent_prev is packed [num_docs * latent_slots, latent_dim], reshape to batched
+            latent_prev_batched = latent_prev.view(num_docs, self._latent_slots, self._latent_dim)
+            latent = latent + self.latent_prev_ln(self.latent_prev_proj(latent_prev_batched))
+        
+        # Get slots per document (may include time/cond tokens)
+        slots_per_doc = latent.shape[1]
+        
+        # Reshape to packed sequence: [num_docs * slots_per_doc, latent_dim]
+        latent = latent.reshape(-1, self._latent_dim)
+        
+        # Create doc_ids: [0,0,...,1,1,...,2,2,...]
+        latent_doc_ids = torch.arange(num_docs, device=device).repeat_interleave(slots_per_doc)
+        
+        # Create offsets: [0, slots, 2*slots, ..., num_docs*slots]
+        latent_offsets = torch.arange(num_docs + 1, device=device) * slots_per_doc
+
+        return latent, latent_doc_ids, latent_offsets
 
     def compute(
         self,
         latent: torch.Tensor,
         tape: torch.Tensor,
         tape_r: torch.Tensor | None,
-        tape_key_padding_mask: torch.Tensor | None = None,
+        # tape_key_padding_mask: torch.Tensor | None = None,
+        tape_document_ids: torch.Tensor | None = None,
+        latent_document_ids: torch.Tensor | None = None,
+        tape_offsets: torch.Tensor | None = None,
+        latent_offsets: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        tape_padding_mask = tape_key_padding_mask
-        merged_padding_mask = tape_key_padding_mask
-        if tape_key_padding_mask is not None and tape_r is not None:
-            zeros = torch.zeros(
-                tape_key_padding_mask.size(0),
-                tape_r.size(-2),
-                dtype=tape_key_padding_mask.dtype,
-                device=tape_key_padding_mask.device,
-            )
-            merged_padding_mask = torch.cat([tape_key_padding_mask, zeros], dim=1)
+        # PRE-CREATE ALL MASKS ONCE to avoid repeated mask creation overhead
+        # This is critical for performance with xformers
+        from .modules.TransformerEncoderLayer import create_document_block_mask
+        from .modules.TransformerDecoderLayer import create_cross_document_block_mask
+        
+        # Create latent self-attention mask (used in latent_processing_units)
+        latent_self_mask = create_document_block_mask(latent_document_ids, offsets=latent_offsets)
+        
+        # Create cross-attention masks
+        # Read: latent queries tape (latent_to_tape)
+        read_cross_mask = create_cross_document_block_mask(
+            latent_document_ids, tape_document_ids,
+            q_offsets=latent_offsets, kv_offsets=tape_offsets
+        )
+        
+        # Write: tape queries latent (tape_to_latent)
+        write_cross_mask = create_cross_document_block_mask(
+            tape_document_ids, latent_document_ids,
+            q_offsets=tape_offsets, kv_offsets=latent_offsets
+        )
+        
+        # Tape self-attention mask (for write units self-attention)
+        tape_self_mask = create_document_block_mask(tape_document_ids, offsets=tape_offsets)
 
         for i in range(len(self._num_layers)):
             if self._cond_decoupled_read:
-                latent = self.read_cond_units[i](latent, tape_r, enc_key_padding_mask=tape_padding_mask)
+                latent = self.read_cond_units[i](latent, tape_r, enc_key_padding_mask=None)
                 latent = self.read_units[i](
                     latent,
                     tape,
-                    enc_key_padding_mask=tape_padding_mask,
+                    cross_attn_mask=read_cross_mask,
+                    self_attn_mask=latent_self_mask,
                 )
             else:
                 tape_merged = _concat_tokens(tape, tape_r)
                 latent = self.read_units[i](
                     latent,
                     tape_merged,
-                    enc_key_padding_mask=merged_padding_mask,
+                    cross_attn_mask=read_cross_mask,
+                    self_attn_mask=latent_self_mask,
                 )
-            latent = self.latent_processing_units[i](latent)
-            tape = self.write_units[i](tape, latent)
+            latent = self.latent_processing_units[i](
+                latent, 
+                self_attn_mask=latent_self_mask,
+            )
+            tape = self.write_units[i](
+                tape, 
+                latent, 
+                cross_attn_mask=write_cross_mask,
+                self_attn_mask=tape_self_mask,
+            )
         return latent, tape
 
     def readout_tape(self, tape: torch.Tensor) -> torch.Tensor:
@@ -384,13 +449,26 @@ class Rin(torch.nn.Module):
         was_training = self.training
         self.eval()
 
-        dummy_tokens = torch.zeros([1, self._num_tokens, self._patch_dim], device=self.device)
-        tape_pos = self._get_base_tape_pos(self._num_tokens)
+        num_docs = 1
+        seq_len = self._num_tokens
+        
+        # Packed format: [num_docs * seq_len, patch_dim]
+        dummy_tokens = torch.zeros([num_docs * seq_len, self._patch_dim], device=self.device)
+        
+        # doc_ids and offsets for packed sequence
+        doc_ids = torch.zeros(num_docs * seq_len, dtype=torch.long, device=self.device)
+        offsets = torch.tensor([0, seq_len], dtype=torch.long, device=self.device)
+        
+        # Packed positional embeddings: [num_docs * seq_len, tape_dim]
+        tape_pos = self._get_base_tape_pos(seq_len).squeeze(0)  # [seq_len, tape_dim]
+        
         self(
             x=dummy_tokens,
             t=0.0,
-            cond=None if num_classes is None else torch.zeros([1, num_classes], device=self.device),
+            cond=None if num_classes is None else torch.zeros([num_docs, num_classes], device=self.device),
             tape_pos_emb=tape_pos,
+            offsets=offsets,
+            doc_ids=doc_ids,
         )
 
         self.train(was_training)
@@ -402,34 +480,43 @@ class Rin(torch.nn.Module):
         cond: torch.Tensor | None = None,
         latent_prev: torch.Tensor | None = None,
         tape_prev: torch.Tensor | None = None,
-        tape_padding_mask: torch.Tensor | None = None,
+        # tape_padding_mask: torch.Tensor | None = None,
         tape_pos_emb: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+        doc_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if x.ndim != 3:
-            raise ValueError("Input tokens must be a B x T x D tensor.")
-        bs = x.shape[0]
+        # if x.ndim != 3:
+        #     raise ValueError("Input tokens must be a B x T x D tensor.")
+        # bs = x.shape[0]
+        # seq_len = x.shape[1]
+        num_docs = int(offsets.shape[0] - 1)
         seq_len = x.shape[1]
-
         if isinstance(t, float) or t.ndim == 0:
-            t = torch.full((bs,), t, device=x.device, dtype=torch.float32)
+            t = torch.full((num_docs,), t, device=x.device, dtype=torch.float32)
 
         if latent_prev is None:
-            latent_prev = torch.zeros(bs, *self.latent_shape, device=x.device)
+            latent_prev = torch.zeros(num_docs * self._latent_slots, self._latent_dim, device=x.device)
 
-        if tape_prev is None:
-            tape_prev = torch.zeros(bs, seq_len, self._tape_dim, device=x.device)
+        # if tape_prev is None:
+        #     # tape_prev = torch.zeros(bs, seq_len, self._tape_dim, device=x.device)
+        #     tape_prev = torch.zeros(num_docs, seq_len, self._tape_dim, device=x.device)
 
         if self._cond_on_latent and cond is None:
             raise ValueError("cond is None but cond_on_latent is True")
 
         time_emb, cond = self.initialize_cond(t, cond)
+        # print("time_emb.shape_init", time_emb.shape)
+        # print("cond.shape", cond.shape)
         tape_pos_emb = tape_pos_emb.to(x.device) if tape_pos_emb is not None else None
-        tape, tape_r = self.initialize_tape(x, time_emb, cond, tape_prev, tape_pos_emb)
-        latent = self.initialize_latent(bs, time_emb, cond, latent_prev)
-        tape_key_padding_mask = None
-        if tape_padding_mask is not None:
-            tape_key_padding_mask = tape_padding_mask.bool().to(x.device)
-        latent, tape = self.compute(latent, tape, tape_r, tape_key_padding_mask)
+        tape, tape_r = self.initialize_tape(x, time_emb, cond, tape_prev, tape_pos_emb, offsets, doc_ids)
+        latent, latent_doc_ids, latent_offsets = self.initialize_latent(num_docs, time_emb, cond, latent_prev)
+        latent, tape = self.compute(
+            latent, tape, tape_r, 
+            tape_document_ids=doc_ids, 
+            latent_document_ids=latent_doc_ids,
+            tape_offsets=offsets,
+            latent_offsets=latent_offsets,
+        )
         x = self.readout_tape(tape)
         return x, latent, tape
 

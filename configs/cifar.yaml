@@ -39,7 +39,7 @@ diffusion:
 
 trainer:
   num_classes: 10
-  train_num_steps: 150000
+  train_num_steps: 300000
   train_batch_size: 256
   split_batches: true
   fp16: false
@@ -62,8 +62,8 @@ trainer:
     iterations: 100
     method: "ddim"
   checkpoint_folder: "/home/stud/ljul/storage/user/cifar/"
-  run_name: "rin_cifar_flex_cfg"
-  log_to_wandb: true 
+  run_name: "rin_cifar_nested_xformers_300k"
+  log_to_wandb: true
   log_every_n_steps: 10
 
 run:

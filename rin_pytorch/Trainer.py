@@ -181,6 +181,8 @@ class Trainer:
                 batch_tokens = batch["patches"]
                 batch_mask = batch.get("patch_mask")
                 batch_pos = batch.get("token_pos_embs")
+                batch_doc_ids = batch.get("doc_ids")
+                batch_offsets = batch.get("offsets")
                 batch_class = batch["labels"]
                 batch_class = torch.nn.functional.one_hot(batch_class, num_classes=self.num_classes).float()
 
@@ -207,6 +209,8 @@ class Trainer:
                         batch_class,
                         attn_mask=batch_mask,
                         tape_pos_emb=batch_pos,
+                        doc_ids=batch_doc_ids,
+                        offsets=batch_offsets,
                     )
                     self.accelerator.backward(loss)
 

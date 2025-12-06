@@ -44,22 +44,43 @@ class Scheduler:
     def add_noise(
         self,
         inputs: torch.Tensor,
+        doc_ids: torch.Tensor,
         t: torch.Tensor | float | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Add noise to packed sequence inputs.
+        
+        Args:
+            inputs: Packed tokens [total_tokens, dim].
+            doc_ids: Document ID for each token [total_tokens].
+            t: Timestep(s). If None, sampled randomly. Can be float or [num_docs] tensor.
+            
+        Returns:
+            inputs_noised: Noised tokens [total_tokens, dim]
+            noise: The noise added [total_tokens, dim]
+            gamma_per_doc: Gamma (transformed timestep) per document [num_docs]
+            gamma: Gamma values per token [total_tokens, 1]
+        """
         device = inputs.device
-        time_step_shape = [inputs.size(0)] + [1] * (inputs.ndim - 1)
+        num_docs = doc_ids.max().item() + 1
+        
         if t is None:
-            t = torch.rand(time_step_shape, device=device)
+            t_per_doc = torch.rand(num_docs, device=device)
         elif isinstance(t, float):
-            t = torch.full(time_step_shape, t, device=device)
+            t_per_doc = torch.full((num_docs,), t, device=device)
         else:
-            t = t.reshape(time_step_shape)
-
-        gamma = self.time_transform(t)
+            t_per_doc = t
+        
+        # Compute gamma per-document (for model's time embedding)
+        gamma_per_doc = self.time_transform(t_per_doc)
+        
+        # Expand gamma to per-token for diffusion math: [total_tokens, 1]
+        gamma = gamma_per_doc[doc_ids].unsqueeze(-1)
+        
         noise = self.sample_noise(inputs.shape, device=device)
         inputs_noised = inputs * torch.sqrt(gamma) + noise * torch.sqrt(1 - gamma)
-
-        return inputs_noised, noise, t.squeeze(), gamma
+        
+        return inputs_noised, noise, gamma_per_doc, gamma
 
     def transition_step(self, samples, data_pred, noise_pred, gamma_now, gamma_prev, sampler_name):
         """Transition to states with a smaller time step."""

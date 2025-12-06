@@ -54,9 +54,19 @@ def unpatchify(patches: torch.Tensor, patch_size: int, channels: int, height: in
     return images
 
 
-def pad_to_max_size(batch, patch_size: int, tape_dim: int, transform=None):
+def pack_sequences(batch, patch_size: int, tape_dim: int, transform=None):
+    """
+    Pack a batch of variable-length token sequences into a single concatenated sequence.
+    
+    Returns a dict with:
+        - patches: (total_tokens, patch_dim) concatenated tokens from all images
+        - token_pos_embs: (total_tokens, tape_dim) concatenated positional embeddings
+        - doc_ids: (total_tokens,) document ID for each token (0, 0, 0, 1, 1, 1, 1, ...)
+        - offsets: (batch_size + 1,) cumulative offsets where each document starts
+        - labels: (batch_size,) class labels
+    """
     if not batch:
-        raise ValueError("Empty batch encountered in pad_to_max_size")
+        raise ValueError("Empty batch encountered in pack_sequences")
 
     labels = []
     token_sequences = []
@@ -72,7 +82,7 @@ def pad_to_max_size(batch, patch_size: int, tape_dim: int, transform=None):
 
         if not isinstance(image, torch.Tensor):
             if transform is None:
-                raise ValueError("pad_to_max_size requires tensor images or a transform to convert them.")
+                raise ValueError("pack_sequences requires tensor images or a transform to convert them.")
             image = transform(image)
 
         if image.ndim != 3:
@@ -98,30 +108,31 @@ def pad_to_max_size(batch, patch_size: int, tape_dim: int, transform=None):
         token_pos_sequences.append(pos)
         token_counts.append(tokens.size(0))
 
-    max_seq_len = max(token_counts)
+    # Compute offsets (cumulative token counts, starting with 0)
+    offsets = torch.zeros(len(token_counts) + 1, dtype=torch.long)
+    offsets[1:] = torch.cumsum(torch.tensor(token_counts, dtype=torch.long), dim=0)
 
-    padded_tokens_seq = []
-    token_masks = []
-    token_pos_embs = []
+    # Create document IDs for each token
+    doc_ids = torch.cat([
+        torch.full((count,), i, dtype=torch.long) 
+        for i, count in enumerate(token_counts)
+    ])
 
-    for tokens, pos_seq, token_count in zip(token_sequences, token_pos_sequences, token_counts):
-        seq_pad = max_seq_len - token_count
-        seq_tokens = tokens if seq_pad == 0 else F.pad(tokens, (0, 0, 0, seq_pad))
-        seq_pos = pos_seq if seq_pad == 0 else F.pad(pos_seq, (0, 0, 0, seq_pad))
-
-        token_mask = torch.ones(max_seq_len, dtype=torch.bool)
-        token_mask[:token_count] = False
-
-        padded_tokens_seq.append(seq_tokens)
-        token_masks.append(token_mask)
-        token_pos_embs.append(seq_pos)
+    # Concatenate all tokens and positional embeddings
+    all_tokens = torch.cat(token_sequences, dim=0)
+    all_pos_embs = torch.cat(token_pos_sequences, dim=0)
 
     batch_dict = {
-        "patches": torch.stack(padded_tokens_seq),
-        "patch_mask": torch.stack(token_masks),
-        "token_pos_embs": torch.stack(token_pos_embs),
+        "patches": all_tokens,
+        "token_pos_embs": all_pos_embs,
+        "doc_ids": doc_ids,
+        "offsets": offsets,
         "labels": torch.tensor(labels, dtype=torch.long),
     }
 
     return batch_dict
+
+
+# Backwards compatibility alias
+pad_to_max_size = pack_sequences
 

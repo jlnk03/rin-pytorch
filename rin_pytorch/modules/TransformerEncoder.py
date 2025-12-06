@@ -1,4 +1,5 @@
 import torch
+from torch import nn
 
 from .TransformerEncoderLayer import TransformerEncoderLayer
 
@@ -19,8 +20,8 @@ class TransformerEncoder(torch.nn.Module):
     ):
         super().__init__()
 
-        self.enc_layers = torch.nn.Sequential(
-            *[
+        self.enc_layers = nn.ModuleList(
+            [
                 TransformerEncoderLayer(
                     dim=dim,
                     mlp_ratio=mlp_ratio,
@@ -36,5 +37,19 @@ class TransformerEncoder(torch.nn.Module):
             ]
         )
 
-    def forward(self, x):
-        return self.enc_layers(x)
+    def forward(
+        self,
+        x: torch.Tensor,
+        self_attn_mask=None,
+        # Legacy args (ignored if self_attn_mask provided)
+        latent_document_ids: torch.Tensor | None = None,
+        latent_offsets: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor
+            self_attn_mask: Pre-created attention mask (preferred for performance)
+        """
+        for layer in self.enc_layers:
+            x, self_attn_mask = layer((x, self_attn_mask))
+        return x

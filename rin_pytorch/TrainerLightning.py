@@ -42,6 +42,9 @@ class RinLightningModule(LightningModule):
         self.rin.pass_dummy_data(num_classes=rin_config["num_classes"])
         self.diffusion_model = RinDiffusionModel(rin=self.rin, **diffusion_config)
 
+        # Note: Model-level compile causes graph breaks with xformers mask creation.
+        # Instead, we compile just the attention computation in MHA_xformers.py
+
         self.rin_ema = Rin(**rin_config)
         self.rin_ema.pass_dummy_data(num_classes=rin_config["num_classes"])
         self.ema_diffusion_model = RinDiffusionModel(rin=self.rin_ema, **diffusion_config)
@@ -60,11 +63,12 @@ class RinLightningModule(LightningModule):
         self._should_profile_first_step = True
         self._grad_accum_counter = 0
 
-    def forward(self, batch_tokens, batch_class, batch_mask=None, pos_embs=None):
+    def forward(self, batch_tokens, batch_class, doc_ids=None, offsets=None, pos_embs=None):
         return self.diffusion_model(
             batch_tokens,
             batch_class,
-            attn_mask=batch_mask,
+            doc_ids=doc_ids,
+            offsets=offsets,
             tape_pos_emb=pos_embs,
         )
 
@@ -84,7 +88,19 @@ class RinLightningModule(LightningModule):
         opt = self.optimizers()
         scheduler = self.lr_schedulers()
 
-        batch_tokens, batch_class, batch_mask, pos_embs = self._extract_batch(batch)
+        # "patches": all_tokens,
+        # "token_pos_embs": all_pos_embs,
+        # "doc_ids": doc_ids,
+        # "offsets": offsets,
+        # "labels": torch.tensor(labels, dtype=torch.long),
+
+        # batch_tokens, batch_class, batch_mask, pos_embs = self._extract_batch(batch)
+        batch_tokens = batch["patches"]
+        batch_class = batch["labels"]
+        pos_embs = batch["token_pos_embs"]
+        doc_ids = batch["doc_ids"]
+        offsets = batch["offsets"]
+
         batch_class = F.one_hot(batch_class, num_classes=self.num_classes).float()
 
         # if self._grad_accum_counter == 0:
@@ -106,7 +122,7 @@ class RinLightningModule(LightningModule):
             profiling_active = True
 
         with profiler_ctx as prof:
-            loss = self.forward(batch_tokens, batch_class, batch_mask, pos_embs)
+            loss = self.forward(batch_tokens, batch_class, doc_ids, offsets, pos_embs)
             self.manual_backward(loss)
 
         self._grad_accum_counter += 1
