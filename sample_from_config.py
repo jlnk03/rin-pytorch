@@ -90,6 +90,7 @@ def sample_from_config(
         cond_decoupled_read=rin_config["cond_decoupled_read"],
         xattn_enc_ln=rin_config["xattn_enc_ln"],
         num_classes=rin_config["num_classes"],
+        sparse_hierarchy=rin_config["sparse_hierarchy"],
     )
 
     print(f"num classes: {rin_config['num_classes']}")

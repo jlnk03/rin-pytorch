@@ -4,7 +4,7 @@ import torch.nn as nn
 from .DropPath import DropPath
 from .MLP import MLP
 from .SparseAttention import HierarchicalSparseAttention
-
+# from .SparseAttentionOptimized import HierarchicalSparseAttention
 
 # HierachicalSparseAttention = torch.compile(HierarchicalSparseAttention, dynamic=True)
 
@@ -31,7 +31,9 @@ class TransformerDecoderLayer(torch.nn.Module):
         self.self_attention = self_attention
         self.cross_attention = cross_attention
         self.use_mlp = use_mlp
-        
+
+
+        print(f"sparse_hierarchy: {sparse_hierarchy}")
         if self_attention:
             self.self_ln = nn.LayerNorm(dim, eps=1e-6, elementwise_affine=ln_scale_shift)
             self.self_mha = HierarchicalSparseAttention(

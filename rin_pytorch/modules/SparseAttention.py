@@ -74,6 +74,7 @@ class HierarchicalSparseAttention(nn.Module):
             default_ratio=critical_ratio,
             default_k=critical_k,
         )
+        print(f"hierarchy_levels: {self.hierarchy_levels}")
         self.block_size = self.hierarchy_levels[-1].block_size  # finest resolution
         self.critical_ratio = self.hierarchy_levels[-1].critical_ratio
         self.critical_k = self.hierarchy_levels[-1].critical_k
