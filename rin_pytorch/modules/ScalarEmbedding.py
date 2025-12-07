@@ -39,7 +39,7 @@ class ScalarEmbedding(torch.nn.Module):
         normalize=False,
     ) -> torch.Tensor:
         assert x.ndim == 1
-        x = self.scalar_encoding(x)  # (batch_size, dim)
+        x = self.scalar_encoding(x).squeeze(1)  # [B, 1, dim] -> [B, dim]
         if normalize:
             x_mean = torch.mean(x, -1, keepdim=True)
             x_std = torch.std(x, -1, correction=0, keepdim=True)
