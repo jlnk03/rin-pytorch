@@ -66,6 +66,15 @@ trainer:
   log_to_wandb: true
   log_every_n_steps: 10
   profile_flops: true
+  # Token masking/dropping schedule (format: "schedule@max,min[,steepness]")
+  # Examples:
+  #   - "none"                  -> disabled
+  #   - "constant@0.5"          -> constant 50% masking
+  #   - "linear@0.7,0.1"        -> linear decay from 70% to 10%
+  #   - "sigmoid@0.7,0.1,10.0"  -> sigmoid decay from 70% to 10%
+  #   - "cosine@0.6,0.1"        -> cosine decay from 60% to 10%
+  token_masking_schedule: "none"
+  token_masking_warmup_steps: 0
   # FID evaluation settings
   fid:
     enabled: false

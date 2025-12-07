@@ -5,7 +5,7 @@ import yaml
 
 import torch
 from rin_pytorch import Rin, RinDiffusionModel
-from torchvision.utils import save_image
+from torchvision.utils import save_image, make_grid
 from tqdm import tqdm
 
 
@@ -29,6 +29,45 @@ def generate_batch(model, batch_size, iterations, method, image_height, image_wi
     return samples
 
 
+def get_starting_index(output_dir: Path, prefix: str = "sample_", suffix: str = ".png") -> int:
+    """Find the next available index based on existing files in the directory."""
+    existing_files = list(output_dir.glob(f"{prefix}*{suffix}"))
+    if not existing_files:
+        return 0
+    
+    max_index = -1
+    for f in existing_files:
+        # Extract the number from filename like "sample_00042.png"
+        name = f.stem  # "sample_00042"
+        try:
+            num_str = name.replace(prefix, "")
+            num = int(num_str)
+            max_index = max(max_index, num)
+        except ValueError:
+            continue
+    
+    return max_index + 1
+
+
+def get_starting_grid_index(output_dir: Path, prefix: str = "grid_", suffix: str = ".png") -> int:
+    """Find the next available grid index based on existing files in the directory."""
+    existing_files = list(output_dir.glob(f"{prefix}*{suffix}"))
+    if not existing_files:
+        return 0
+    
+    max_index = -1
+    for f in existing_files:
+        name = f.stem  # "grid_042"
+        try:
+            num_str = name.replace(prefix, "")
+            num = int(num_str)
+            max_index = max(max_index, num)
+        except ValueError:
+            continue
+    
+    return max_index + 1
+
+
 def sample_from_config(
     config_path,
     checkpoint_path,
@@ -49,6 +88,16 @@ def sample_from_config(
     # Create output directory
     output_dir = Path(output_dir)
     output_dir.mkdir(exist_ok=True, parents=True)
+    
+    # Find starting index based on existing files
+    if make_grid:
+        starting_index = get_starting_grid_index(output_dir)
+        if starting_index > 0:
+            print(f"Found existing grid images, continuing from grid_{starting_index:03d}.png")
+    else:
+        starting_index = get_starting_index(output_dir)
+        if starting_index > 0:
+            print(f"Found existing images, continuing from sample_{starting_index:05d}.png")
 
     # Use either provided dimensions or config dimensions
     if image_height is None:
@@ -139,7 +188,8 @@ def sample_from_config(
     # Calculate number of batches
     num_batches = math.ceil(num_samples / batch_size)
     samples_left = num_samples
-    current_index = 0
+    current_index = starting_index
+    current_grid_index = starting_index if make_grid else 0
 
     # Generate samples in batches
     print(f"Generating {num_samples} samples in {num_batches} batches...")
@@ -166,11 +216,13 @@ def sample_from_config(
             nrow = grid_nrow or min(8, current_batch_size)
             save_image(
                 samples,
-                output_dir / f"grid_{batch_idx:03d}.png",
+                output_dir / f"grid_{current_grid_index:03d}.png",
                 nrow=nrow,
                 normalize=False,
                 value_range=(0, 1),
+                padding=0,
             )
+            current_grid_index += 1
         else:
             # Save individual images from this batch
             for i, sample in enumerate(samples):
@@ -189,7 +241,10 @@ def sample_from_config(
         del samples
         torch.cuda.empty_cache()
 
-    print(f"Done! Generated {num_samples} samples saved to {output_dir}")
+    if make_grid:
+        print(f"Done! Generated {num_samples} samples in {num_batches} grids saved to {output_dir}")
+    else:
+        print(f"Done! Generated {num_samples} samples (indices {starting_index}-{current_index - 1}) saved to {output_dir}")
 
     return output_dir
 

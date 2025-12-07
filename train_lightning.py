@@ -1,9 +1,11 @@
 import argparse
+import random
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 import torchvision
@@ -221,10 +223,13 @@ def build_dataloader(config, data_root: str):
     else:
         dataset = torchvision.datasets.ImageFolder(root=data_root, transform=transform)
 
+    # Pass max image dimensions to ensure consistent position embeddings across all image sizes
     collate_fn = lambda batch: pad_to_max_size(
         batch,
         patch_size=rin_cfg["patch_size"],
         tape_dim=rin_cfg["tape_dim"],
+        max_image_height=rin_cfg["image_height"],
+        max_image_width=rin_cfg["image_width"],
     )
 
     return DataLoader(
@@ -265,7 +270,21 @@ def main():
         default=None,
         help="WandB resume flag or run id to resume an existing run.",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for reproducibility. If set, ensures deterministic initialization.",
+    )
     args = parser.parse_args()
+
+    # Set random seeds if specified
+    if args.seed is not None:
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
 
     config = load_config(args.config)
     data_root = resolve_data_root(args.data_root, config)

@@ -180,3 +180,5 @@ cifar10/
 wandb/
 lightning_logs/
 results_2/
+
+*.csv

@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 from torch.profiler import ProfilerActivity, profile
 from torchvision.utils import make_grid
+from fvcore.nn import FlopCountAnalysis, flop_count_table
 
 from pytorch_lightning import LightningModule
 
@@ -13,6 +14,7 @@ from .utils.optimization_utils import (
     get_optimizer,
     override_config_for_names,
 )
+from .utils.masking_schedule import parse_masking_schedule, apply_token_masking
 from diffusers.optimization import get_scheduler as get_lr_scheduler
 
 
@@ -60,6 +62,20 @@ class RinLightningModule(LightningModule):
         self._should_profile_first_step = True
         self._grad_accum_counter = 0
 
+        # Token masking/dropping schedule (format: "schedule@param1,param2,...")
+        # Examples: "sigmoid@0.7,0.1", "linear@0.5,0.0", "constant@0.3", "none"
+        masking_schedule_str = trainer_config.get("token_masking_schedule", "none")
+        masking_warmup = trainer_config.get("token_masking_warmup_steps", 0)
+        self.masking_enabled = masking_schedule_str.lower() not in ("none", "disabled", "")
+        if self.masking_enabled:
+            self.masking_schedule_fn = parse_masking_schedule(
+                schedule_str=masking_schedule_str,
+                warmup_steps=masking_warmup,
+                total_steps=trainer_config["train_num_steps"],
+            )
+        else:
+            self.masking_schedule_fn = None
+
     def forward(self, batch_tokens, batch_class, batch_mask=None, pos_embs=None):
         return self.diffusion_model(
             batch_tokens,
@@ -86,6 +102,17 @@ class RinLightningModule(LightningModule):
 
         batch_tokens, batch_class, batch_mask, pos_embs = self._extract_batch(batch)
         batch_class = F.one_hot(batch_class, num_classes=self.num_classes).float()
+
+        # Apply token masking/dropping based on schedule
+        current_mask_ratio = 0.0
+        if self.masking_enabled and self.masking_schedule_fn is not None:
+            current_mask_ratio = self.masking_schedule_fn(self.global_step)
+            if current_mask_ratio > 0.0:
+                batch_tokens, batch_mask = apply_token_masking(
+                    batch_tokens,
+                    mask_ratio=current_mask_ratio,
+                    existing_mask=batch_mask,
+                )
 
         # if self._grad_accum_counter == 0:
         opt.zero_grad(set_to_none=True)
@@ -152,6 +179,18 @@ class RinLightningModule(LightningModule):
             batch_size=batch_tokens.size(0),
         )
 
+        # Log masking ratio if enabled
+        if self.masking_enabled:
+            self.log(
+                "mask_ratio",
+                current_mask_ratio,
+                on_step=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+                batch_size=batch_tokens.size(0),
+            )
+
         if profiling_active and prof is not None:
             total_flops = sum(event.flops for event in prof.key_averages() if event.flops)
             if total_flops:
@@ -171,9 +210,16 @@ class RinLightningModule(LightningModule):
                     logger=True,
                     sync_dist=False,
                 )
-                self.print(f"Profiled FLOPs (first forward/backward): {total_flops / 1e12:.4f} TFLOPs")
+                self.print(f"[torch.profiler] FLOPs (first forward/backward): {total_flops / 1e12:.4f} TFLOPs")
             else:
-                self.print("Profiler executed but no FLOPs information was collected.")
+                self.print("[torch.profiler] Executed but no FLOPs information was collected.")
+
+            # fvcore FLOPs analysis for forward pass only
+            try:
+                self._log_fvcore_flops(batch_tokens, batch_class, batch_mask, pos_embs)
+            except Exception as e:
+                self.print(f"[fvcore] FLOPs analysis failed: {e}")
+
             self._should_profile_first_step = False
 
         # if should_step:
@@ -229,6 +275,69 @@ class RinLightningModule(LightningModule):
             for ema_param, param in zip(self.ema_diffusion_model.parameters(), self.diffusion_model.parameters()):
                 if param.requires_grad:
                     ema_param.data.lerp_(param.data, 1 - self.ema_decay)
+
+    def _log_fvcore_flops(self, batch_tokens, batch_class, batch_mask, pos_embs):
+        """Compute and log GFLOPs using fvcore's FlopCountAnalysis.
+        
+        Analyzes the Rin denoiser directly since the full RinDiffusionModel
+        contains random sampling and dynamic control flow that breaks tracing.
+        
+        Reports FLOPs per single sample (batch_size=1) as is standard in papers.
+        """
+        was_training = self.rin.training
+        self.rin.eval()
+
+        with torch.no_grad():
+            # Use batch_size=1 for per-sample FLOPs (standard for paper comparisons)
+            _, seq_len, token_dim = batch_tokens.shape
+            device = batch_tokens.device
+
+            # x: input tokens (1, T, D)
+            dummy_x = torch.zeros(1, seq_len, token_dim, device=device)
+
+            # t: timesteps (1,)
+            dummy_t = torch.full((1,), 0.5, device=device, dtype=torch.float32)
+
+            # cond: class conditioning (1, num_classes)
+            dummy_cond = torch.zeros(1, batch_class.shape[-1], device=device)
+
+            # latent_prev: previous latent (1, latent_slots, latent_dim)
+            dummy_latent = torch.zeros(1, *self.rin.latent_shape, device=device)
+
+            # tape_prev: previous tape (1, T, tape_dim)
+            dummy_tape = torch.zeros(1, seq_len, self.rin.tape_dim, device=device)
+
+            # For single sample, no masking needed
+            dummy_mask = None
+            dummy_pos_emb = pos_embs[:1] if pos_embs is not None else None
+
+            # fvcore analyzes the Rin model forward pass
+            flops = FlopCountAnalysis(
+                self.rin,
+                (dummy_x, dummy_t, dummy_cond, dummy_latent, dummy_tape, dummy_mask, dummy_pos_emb),
+            )
+            flops.unsupported_ops_warnings(False)
+            flops.uncalled_modules_warnings(False)
+
+            total_flops = flops.total()
+            gflops = total_flops / 1e9
+
+            self.log(
+                "fvcore/gflops_per_sample",
+                gflops,
+                on_step=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=False,
+            )
+            self.print(f"[fvcore] Rin forward pass GFLOPs (per sample): {gflops:.4f}")
+
+            # Print detailed breakdown
+            self.print("[fvcore] FLOPs breakdown by operator:")
+            self.print(flop_count_table(flops))
+
+        if was_training:
+            self.rin.train()
 
     def _log_samples(self, step):
         log_image = getattr(self.logger, "log_image", None)

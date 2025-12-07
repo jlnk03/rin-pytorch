@@ -40,8 +40,8 @@ diffusion:
 
 trainer:
   num_classes: 1000
-  train_num_steps: 150000
-  train_batch_size: 512
+  train_num_steps:  300000
+  train_batch_size: 256
   split_batches: true
   fp16: false
   lr_scheduler_name: "cosine"
@@ -62,10 +62,13 @@ trainer:
     iterations: 100
     method: "ddim"
   checkpoint_folder: "/home/stud/ljul/storage/user/imagenet/"
-  run_name: "rin_imagenet_flex_64"
+  run_name: "rin_cifar_flex_cfg_300k_sigmoid_0.7_0.0_8"
   log_to_wandb: true
   log_every_n_steps: 10
   profile_flops: true
+  # Token masking schedule: "none", "constant@0.5", "linear@0.7,0.1", "sigmoid@0.7,0.1", "cosine@0.6,0.1"
+  token_masking_schedule: "none"
+  token_masking_warmup_steps: 0
   # FID evaluation settings
   fid:
     enabled: false

@@ -39,8 +39,8 @@ diffusion:
 
 trainer:
   num_classes: 10
-  train_num_steps: 150000
-  train_batch_size: 256
+  train_num_steps: 300000
+  train_batch_size: 1024
   split_batches: true
   fp16: false
   amp: false
@@ -59,12 +59,16 @@ trainer:
   ema_decay: 0.9999
   ema_update_every: 1
   sampling_kwargs:
-    iterations: 100
-    method: "ddim"
+    iterations: 1000
+    method: "ddpm"
   checkpoint_folder: "/home/stud/ljul/storage/user/cifar/"
-  run_name: "rin_cifar_flex_cfg"
-  log_to_wandb: true 
+  run_name: "rin_cifar_flex_cfg_300k_sigmoid_0.7_0.0_8"
+  log_to_wandb: false
   log_every_n_steps: 10
+  # Token masking schedule: "none", "constant@0.5", "linear@0.7,0.1", "sigmoid@0.7,0.1", "cosine@0.6,0.1"
+  # token_masking_schedule: "linear@0.7,0.0"
+  token_masking_schedule: "none"
+  token_masking_warmup_steps: 0
 
 run:
   vanilla: false

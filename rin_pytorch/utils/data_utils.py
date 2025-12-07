@@ -54,9 +54,34 @@ def unpatchify(patches: torch.Tensor, patch_size: int, channels: int, height: in
     return images
 
 
-def pad_to_max_size(batch, patch_size: int, tape_dim: int, transform=None):
+def pad_to_max_size(
+    batch,
+    patch_size: int,
+    tape_dim: int,
+    transform=None,
+    max_image_height: int | None = None,
+    max_image_width: int | None = None,
+):
+    """
+    Pad images to the same size within a batch.
+    
+    Args:
+        batch: List of (image, label) tuples or dicts
+        patch_size: Size of each patch
+        tape_dim: Dimension of tape/position embeddings
+        transform: Optional transform to convert images to tensors
+        max_image_height: Reference height for position embeddings (ensures consistent
+                          embeddings across different image sizes). If None, uses each
+                          image's actual height.
+        max_image_width: Reference width for position embeddings. If None, uses each
+                         image's actual width.
+    """
     if not batch:
         raise ValueError("Empty batch encountered in pad_to_max_size")
+
+    # Compute reference grid dimensions for position embeddings
+    ref_rows = max_image_height // patch_size if max_image_height else None
+    ref_cols = max_image_width // patch_size if max_image_width else None
 
     labels = []
     token_sequences = []
@@ -93,7 +118,12 @@ def pad_to_max_size(batch, patch_size: int, tape_dim: int, transform=None):
         nh = image.shape[1] // patch_size
         nw = image.shape[2] // patch_size
         tokens = patchify(image, patch_size)
-        pos = create_2d_sin_cos_pos_emb(nh, nw, tape_dim).view(-1, tape_dim)
+        # Use reference dimensions for consistent position embeddings across all image sizes
+        pos = create_2d_sin_cos_pos_emb(
+            nh, nw, tape_dim,
+            reference_rows=ref_rows,
+            reference_cols=ref_cols,
+        ).view(-1, tape_dim)
         token_sequences.append(tokens)
         token_pos_sequences.append(pos)
         token_counts.append(tokens.size(0))
