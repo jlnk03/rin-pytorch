@@ -2,9 +2,15 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from PIL import Image
+import torch
 from torch.utils.data import DataLoader, Dataset
 import torchvision
 from torchvision import transforms
+
+from datasets import load_dataset
+import torch.utils.data
+
+from .utils.data_utils import pad_to_max_size
 
 
 DEFAULT_IMAGENET_ROOT = "/home/stud/ljul/storage/group/dataset_mirrors/imagenet2012/imagenet2012_download/train"
@@ -46,6 +52,41 @@ class FlexibleCIFAR10(Dataset):
         if self.transform:
             image = self.transform(image)
 
+        if isinstance(image, torch.Tensor):
+            # HuggingFace images converted via torchvision can keep non-resizable storages.
+            # Cloning ensures DataLoader can move them into shared memory safely.
+            image = image.contiguous().clone()
+
+        return image, label
+
+
+class ImageNetWebDataset(torch.utils.data.Dataset):
+    """
+    ImageNet-1k from HuggingFace Datasets, wrapped to behave like torchvision's ImageFolder:
+    __getitem__ returns (image_tensor, label_int).
+    """
+    def __init__(self, split: str = "train", transform=None):
+        super().__init__()
+        self.transform = transform
+        # This will download/cache under ~/.cache/huggingface by default
+        self.dataset = load_dataset("imagenet-1k", split=split)
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        example = self.dataset[idx]
+        # Convert to RGB and copy to fully detach from Arrow memory mapping
+        image = example["image"].convert("RGB")
+        label = int(example["label"])
+
+        if self.transform is not None:
+            image = self.transform(image)
+
+        # Clone tensor to ensure storage is resizable for DataLoader workers
+        if isinstance(image, torch.Tensor):
+            image = image.clone()
+
         return image, label
 
 
@@ -85,12 +126,23 @@ def build_training_dataset(config: Dict[str, Any], data_root: str):
     if run_cfg.get("cifar", False):
         return FlexibleCIFAR10(root_dir=data_root, train=True, transform=transform)
 
-    return torchvision.datasets.ImageFolder(root=data_root, transform=transform)
+    # return torchvision.datasets.ImageFolder(root=data_root, transform=transform)
+    return ImageNetWebDataset(split="train", transform=transform)
 
 
 def build_training_dataloader(config: Dict[str, Any], data_root: str) -> DataLoader:
     trainer_cfg = config["trainer"]
+    rin_cfg = config["rin"]
     dataset = build_training_dataset(config, data_root)
+
+    patch_size = rin_cfg["patch_size"]
+    tape_dim = rin_cfg["tape_dim"]
+
+    collate_fn = lambda batch: pad_to_max_size(
+        batch,
+        patch_size=patch_size,
+        tape_dim=tape_dim,
+    )
 
     return DataLoader(
         dataset,
@@ -100,5 +152,6 @@ def build_training_dataloader(config: Dict[str, Any], data_root: str) -> DataLoa
         pin_memory=True,
         persistent_workers=trainer_cfg["num_dl_workers"] > 0,
         drop_last=True,
+        collate_fn=collate_fn,
     )
 

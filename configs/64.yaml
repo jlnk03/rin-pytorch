@@ -41,7 +41,7 @@ diffusion:
 trainer:
   num_classes: 1000
   train_num_steps:  300000
-  train_batch_size: 256
+  train_batch_size: 64
   split_batches: true
   fp16: false
   lr_scheduler_name: "cosine"
@@ -61,8 +61,8 @@ trainer:
   sampling_kwargs:
     iterations: 100
     method: "ddim"
-  checkpoint_folder: "/home/stud/ljul/storage/user/imagenet/"
-  run_name: "rin_cifar_flex_cfg_300k_sigmoid_0.7_0.0_8"
+  checkpoint_folder: "/dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/imagenet"
+  run_name: "rin_imagenet_flex_cfg_64_lrz_300k_4n"
   log_to_wandb: true
   log_every_n_steps: 10
   profile_flops: true

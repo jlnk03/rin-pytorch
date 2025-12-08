@@ -8,12 +8,14 @@ from torchvision import transforms
 from torchmetrics.image.fid import FrechetInceptionDistance
 from tqdm import tqdm
 
-from rin_pytorch.data import DEFAULT_CIFAR_ROOT, FlexibleCIFAR10
+from rin_pytorch.data import DEFAULT_CIFAR_ROOT, FlexibleCIFAR10, ImageNetWebDataset
 
 
 # Default cache directories
-IMAGENET_CACHE_DIR = Path("/home/stud/ljul/storage/user/imagenet")
-CIFAR_CACHE_DIR = Path("/home/stud/ljul/storage/user/cifar")
+# IMAGENET_CACHE_DIR = Path("/home/stud/ljul/storage/user/imagenet")
+# CIFAR_CACHE_DIR = Path("/home/stud/ljul/storage/user/cifar")
+CIFAR_CACHE_DIR = Path("/dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/cifar")
+IMAGENET_CACHE_DIR = Path("/dss/dsstbyfs02/pn52ko/pn52ko-dss-0000/tum/results/imagenet")
 
 # Transform for FID: resize to 299x299 and convert to uint8 tensor [0, 255]
 FID_TRANSFORM = transforms.Compose(
@@ -44,6 +46,19 @@ class ImageFolderDataset(Dataset):
 class FlexibleCIFARImageDataset(Dataset):
     def __init__(self, root_dir: str, train: bool, transform):
         self.dataset = FlexibleCIFAR10(root_dir=root_dir, train=train, transform=transform)
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        image, _ = self.dataset[idx]
+        return image
+
+
+class ImageNetFIDDataset(Dataset):
+    """Wrapper around ImageNetWebDataset for FID computation (returns only images)."""
+    def __init__(self, split: str = "train", transform=None):
+        self.dataset = ImageNetWebDataset(split=split, transform=transform)
 
     def __len__(self):
         return len(self.dataset)
@@ -86,7 +101,7 @@ def load_real_stats(fid: FrechetInceptionDistance, cache_path: Path, device: tor
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--path1", type=str, default=None,
-                       help="Path to first image folder. Ignored when --flexible_cifar is set.")
+                       help="Path to first image folder. Ignored when --flexible_cifar or --imagenet is set.")
     parser.add_argument("--path2", type=str, required=True,
                        help="Path to second image folder")
     parser.add_argument("--flexible_cifar", action="store_true",
@@ -95,12 +110,16 @@ def main():
                        help="Flexible CIFAR-10 split to use when --flexible_cifar is set.")
     parser.add_argument("--cifar_root", type=str, default=None,
                        help=f"Root directory for Flexible CIFAR-10. Defaults to '{DEFAULT_CIFAR_ROOT}'.")
+    parser.add_argument("--imagenet", action="store_true",
+                       help="Use ImageNet-1k from HuggingFace for the first dataset.")
+    parser.add_argument("--imagenet_split", choices=["train", "validation"], default="train",
+                       help="ImageNet split to use when --imagenet is set.")
     parser.add_argument("--batch_size", type=int, default=64,
                        help="Batch size for processing")
     parser.add_argument("--feature", type=int, default=2048,
                        help="Feature dimension for FID (64, 192, 768, or 2048)")
     parser.add_argument("--cache_dir", type=str, default=None,
-                       help="Directory to cache real image statistics. Auto-set for --flexible_cifar.")
+                       help="Directory to cache real image statistics. Auto-set for --flexible_cifar and --imagenet.")
     parser.add_argument("--recompute_cache", action="store_true",
                        help="Force recomputation of cached real image statistics.")
     args = parser.parse_args()
@@ -113,6 +132,9 @@ def main():
     if args.flexible_cifar:
         cache_dir = Path(args.cache_dir) if args.cache_dir else CIFAR_CACHE_DIR
         cache_path = get_cache_path(cache_dir, args.feature, args.cifar_split)
+    elif args.imagenet:
+        cache_dir = Path(args.cache_dir) if args.cache_dir else IMAGENET_CACHE_DIR
+        cache_path = get_cache_path(cache_dir, args.feature, args.imagenet_split)
     elif args.cache_dir:
         cache_dir = Path(args.cache_dir)
         cache_path = get_cache_path(cache_dir, args.feature, "custom")
@@ -134,9 +156,14 @@ def main():
                 train=args.cifar_split == "train",
                 transform=FID_TRANSFORM,
             )
+        elif args.imagenet:
+            dataset1 = ImageNetFIDDataset(
+                split=args.imagenet_split,
+                transform=FID_TRANSFORM,
+            )
         else:
             if args.path1 is None:
-                parser.error("--path1 is required when --flexible_cifar is not set.")
+                parser.error("--path1 is required when --flexible_cifar or --imagenet is not set.")
             dataset1 = ImageFolderDataset(args.path1, transform=FID_TRANSFORM)
 
         dataloader1 = DataLoader(dataset1, batch_size=args.batch_size, 
