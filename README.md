@@ -8,6 +8,34 @@ The model is implemented using [Keras Core](https://keras.io/keras_core/) with t
 
 The training logic is adapted from [lucidrains/recurrent-interface-network-pytorch](https://github.com/lucidrains/recurrent-interface-network-pytorch).
 
+## New Feature: Hierarchical Sparse Attention
+
+This repository now includes `EfficientSparseAttention`, an implementation of hierarchical sparse attention with true coarse-to-fine refinement. This achieves **multiplicative sparsity** (e.g., 87.5% sparse with 2 levels) rather than additive sparsity (75%).
+
+Key features:
+- 🎯 True hierarchical coarse-to-fine refinement
+- 📊 Multiplicative sparsity: ratio₁ × ratio₂ × ... × ratioₙ
+- 🚀 Significant memory reduction (8× for 2-level, 20× for 3-level)
+- ⚙️ Flexible multi-level hierarchy configuration
+- 🔧 Multiple backend support (xformers, truly_sparse, flex)
+
+See [HIERARCHICAL_SPARSE_ATTENTION.md](HIERARCHICAL_SPARSE_ATTENTION.md) for detailed documentation and usage examples.
+
+```python
+from rin_pytorch.modules import EfficientSparseAttention
+
+# Create 2-level hierarchical sparse attention
+attn = EfficientSparseAttention(
+    embed_dim=512,
+    num_heads=8,
+    hierarchy=[
+        {'block_size': 4, 'critical_ratio': 0.5},   # Keep 50% of coarse blocks
+        {'block_size': 2, 'critical_ratio': 0.25}   # Keep 25% within survivors
+    ]
+)
+# Achieves 87.5% sparsity (0.5 × 0.25 = 0.125 kept)
+```
+
 ## Usage
 
 ```python
